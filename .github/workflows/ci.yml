@@ -19,6 +19,8 @@ jobs:
         run: ./scripts/test-status-item.sh
       - name: Particle animation tests
         run: ./scripts/test-particle-animation.sh
+      - name: Claude Desktop cache self-test
+        run: make test-claude-desktop-cache
       - name: Rate limit tests
         run: ./scripts/test-rate-limits.sh
       - name: Statistics time zone tests
