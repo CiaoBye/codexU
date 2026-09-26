@@ -68,3 +68,24 @@ jobs:
         run: npm run build
       - name: Test Windows Web contracts
         run: npm run test:contracts
+
+
+  beta-package:
+    if: github.event_name == 'pull_request'
+    needs: macos
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build coexistence-safe Apple Silicon beta
+        run: make dev-dmg-arm64
+      - name: Create checksum
+        run: shasum -a 256 dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg > dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg.sha256
+      - name: Upload beta artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexu-next-1.4.0-beta.1-macos-arm64
+          path: |
+            dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg
+            dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg.sha256
+          if-no-files-found: error
