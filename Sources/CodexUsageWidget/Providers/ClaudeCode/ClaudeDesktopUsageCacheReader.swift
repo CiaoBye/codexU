@@ -507,8 +507,9 @@ final class ClaudeDesktopUsageCacheReader {
     static func diagnosticJSON(
         context: RuntimeLoadContext = .live()
     ) -> String {
+        let reader = ClaudeDesktopUsageCacheReader()
         var messages: [String] = []
-        let snapshot = ClaudeDesktopUsageCacheReader().load(
+        let snapshot = reader.load(
             context: context,
             messages: &messages
         )
@@ -528,8 +529,58 @@ final class ClaudeDesktopUsageCacheReader {
             return result
         }
 
+        // This second pass is diagnostic-only and counts parser stages without
+        // exposing cache keys, organization IDs, file names, cookies or bodies.
+        let directories = reader.cacheDirectories(home: context.homeDirectory)
+        var candidateEntryCount = 0
+        var usageKeyEntryCount = 0
+        var zstdUsageEntryCount = 0
+        var rawUsageEntryCount = 0
+        var parsedBodyCount = 0
+        var decodedUsageResponseCount = 0
+
+        for directory in directories {
+            for entry in reader.recentEntries(in: directory) {
+                candidateEntryCount += 1
+                guard let file = reader.contents(of: entry) else { continue }
+                usageKeyEntryCount += 1
+
+                let bytes = [UInt8](file.bytes)
+                if let key = key(in: bytes) {
+                    let bodyStart = Self.headerBytes + key.utf8.count
+                    if bodyStart < bytes.count {
+                        let remainder = Array(bytes[bodyStart...])
+                        if remainder.count >= Self.zstdMagic.count,
+                           Array(remainder.prefix(Self.zstdMagic.count)) == Self.zstdMagic {
+                            zstdUsageEntryCount += 1
+                        } else {
+                            let raw = remainder.drop { byte in
+                                byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
+                            }
+                            if raw.first == 0x7B || raw.first == 0x5B {
+                                rawUsageEntryCount += 1
+                            }
+                        }
+                    }
+                }
+
+                guard let parsed = parse(entry: file.bytes) else { continue }
+                parsedBodyCount += 1
+                if decodeUsageBody(parsed.body) != nil {
+                    decodedUsageResponseCount += 1
+                }
+            }
+        }
+
         var object: [String: Any] = [
             "desktopCacheDetected": snapshot.exists,
+            "cacheDirectoryCount": directories.count,
+            "candidateEntryCount": candidateEntryCount,
+            "usageKeyEntryCount": usageKeyEntryCount,
+            "zstdUsageEntryCount": zstdUsageEntryCount,
+            "rawUsageEntryCount": rawUsageEntryCount,
+            "parsedBodyCount": parsedBodyCount,
+            "decodedUsageResponseCount": decodedUsageResponseCount,
             "hasQuota": snapshot.hasQuota,
             "isStale": snapshot.isStale,
             "organizationCount": snapshot.discoveredOrganizationCount,
