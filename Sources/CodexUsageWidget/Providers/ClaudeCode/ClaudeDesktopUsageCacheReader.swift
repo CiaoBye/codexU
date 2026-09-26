@@ -234,7 +234,7 @@ final class ClaudeDesktopUsageCacheReader {
         return (bytes, modified)
     }
 
-    static func parse(entry bytes: Data) -> ParsedEntry? {
+    private static func parse(entry bytes: Data) -> ParsedEntry? {
         let entry = [UInt8](bytes)
         guard let key = key(in: entry),
               let organization = usageOrganization(inKey: key)
@@ -442,8 +442,10 @@ final class ClaudeDesktopUsageCacheReader {
             }
 
             let declared = ZSTD_getFrameContentSize(sourceAddress, source.count)
-            if declared != ZSTD_CONTENTSIZE_UNKNOWN,
-               declared != ZSTD_CONTENTSIZE_ERROR,
+            let unknownContentSize = UInt64.max
+            let errorContentSize = UInt64.max - 1
+            if declared != unknownContentSize,
+               declared != errorContentSize,
                declared > UInt64(Self.maxDecompressedBytes) {
                 return nil
             }
