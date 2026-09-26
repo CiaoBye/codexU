@@ -48,7 +48,7 @@ struct RuntimeSelector: View {
         case .codex:
             return "Codex"
         case .claudeCode:
-            return language.text("Claude Code", "Claude Code")
+            return "Claude"
         }
     }
 }
@@ -506,35 +506,27 @@ struct RuntimeSummaryCard: View {
     }
 
     private var localizedSourceLabel: String {
-        let hasQuota = summary.fiveHourRemainingPercent != nil
-            || summary.sevenDayRemainingPercent != nil
-            || summary.monthlyRemainingPercent != nil
+        let source = summary.sourceLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else {
+            return language.text("等待本机数据源", "Waiting for local source")
+        }
+
         if language.isChinese {
-            switch summary.scope {
-            case .codex:
-                if hasQuota { return "官方额度 + 本机统计" }
-                return summary.status == .available
-                    ? "官方额度：当前无限制 · 本机统计"
-                    : "本机统计；额度暂不可用"
-            case .claudeCode:
-                if hasQuota {
-                    return summary.status == .stale ? "过期快照 + 本机统计" : "active snapshot + 本机统计"
-                }
-                return "本机统计；额度需 active snapshot"
-            }
+            return source
+                .replacingOccurrences(of: " · stale", with: " · 已过期")
+                .replacingOccurrences(of: "Codex app-server + local records", with: "Codex 官方额度 + 本机统计")
+                .replacingOccurrences(of: "Claude Desktop 本地缓存 · 只读", with: "Claude Desktop 本地缓存 · 只读")
+                .replacingOccurrences(of: "Claude statusLine · 本地快照", with: "Claude statusLine · 本地快照")
         }
-        switch summary.scope {
-        case .codex:
-            if hasQuota { return "Official quota + local records" }
-            return summary.status == .available
-                ? "Official quota: no active limits · local records"
-                : "Local records; quota unavailable"
-        case .claudeCode:
-            if hasQuota {
-                return summary.status == .stale ? "Stale snapshot + local records" : "Active snapshot + local records"
-            }
-            return "Local records; quota needs active snapshot"
-        }
+
+        return source
+            .replacingOccurrences(of: "Claude Desktop 本地缓存 · 只读", with: "Claude Desktop local cache · read-only")
+            .replacingOccurrences(of: "Claude Desktop 本地缓存 · 已过期", with: "Claude Desktop local cache · stale")
+            .replacingOccurrences(of: "Claude statusLine · 本地快照", with: "Claude statusLine · local snapshot")
+            .replacingOccurrences(of: "Claude statusLine · 已过期", with: "Claude statusLine · stale")
+            .replacingOccurrences(of: "Claude 本地记录 · 暂无额度快照", with: "Claude local records · no quota snapshot")
+            .replacingOccurrences(of: "Codex app-server + local records", with: "Codex official quota + local records")
+            .replacingOccurrences(of: " · stale", with: " · stale")
     }
 }
 
