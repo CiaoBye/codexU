@@ -13,6 +13,10 @@ struct QuotaEfficiencyCheckpoint: Codable, Equatable {
     let capturedAt: Date
     let weeklyUsedPercent: Double
     let weeklyResetsAt: Date
+    /// All detailed Codex usage in the same rolling local history, including
+    /// models with no reasoning_effort field (for example auxiliary/review
+    /// traffic). This is the denominator used by the dominance guard.
+    let allUsage: PricedTokenUsage
     let variants: [QuotaEfficiencyVariantTotal]
 }
 
@@ -108,10 +112,18 @@ final class QuotaEfficiencyHistoryStore {
         let variants = variantTotals(from: modelTrends)
         guard !variants.isEmpty else { return loadSummaries() }
 
+        let allUsage = trend.dayBuckets.reduce(into: PricedTokenUsage.zero) { result, bucket in
+            result.add(
+                tokens: bucket.usage.tokens,
+                costUSD: bucket.usage.estimatedCostUSD,
+                usesReferencePricing: bucket.usage.usesReferencePricing
+            )
+        }
         let checkpoint = QuotaEfficiencyCheckpoint(
             capturedAt: date,
             weeklyUsedPercent: max(0, min(100, weekly.usedPercent)),
             weeklyResetsAt: reset,
+            allUsage: allUsage,
             variants: variants
         )
 
@@ -278,7 +290,16 @@ final class QuotaEfficiencyHistoryStore {
             ))
         }
 
-        let totalTokens = deltas.reduce(Int64(0)) { $0 + $1.usage.tokens.visibleTotalTokens }
+        let allTokenDelta = current.allUsage.tokens.delta(from: previous.allUsage.tokens)
+        guard allTokenDelta.inputTokens >= 0,
+              allTokenDelta.cachedInputTokens >= 0,
+              allTokenDelta.cacheWriteInputTokens >= 0,
+              allTokenDelta.outputTokens >= 0,
+              allTokenDelta.totalTokens >= 0
+        else {
+            return nil
+        }
+        let totalTokens = allTokenDelta.visibleTotalTokens
         guard totalTokens > 0,
               let dominant = deltas.max(by: {
                   $0.usage.tokens.visibleTotalTokens < $1.usage.tokens.visibleTotalTokens
@@ -398,19 +419,21 @@ final class QuotaEfficiencyHistoryStore {
             capturedAt: reset.addingTimeInterval(-3600),
             weeklyUsedPercent: 20,
             weeklyResetsAt: reset,
+            allUsage: usage(total: 15_000_000, input: 14_850_000, cached: 14_550_000, output: 150_000),
             variants: [high0, max0]
         )
         let second = QuotaEfficiencyCheckpoint(
             capturedAt: reset.addingTimeInterval(-1800),
             weeklyUsedPercent: 30,
             weeklyResetsAt: reset,
+            allUsage: usage(total: 40_500_000, input: 40_195_000, cached: 39_335_000, output: 305_000),
             variants: [high1, max1]
         )
 
         let store = QuotaEfficiencyHistoryStore()
         let observation = store.makeObservation(previous: first, current: second)
         expect(observation?.variant.effort == "high",
-               "a 98% dominant High interval should be attributed to High")
+               "a dominant High interval should be attributed to High")
         expect(abs((observation?.quotaDeltaPercent ?? 0) - 10) < 0.000_001,
                "weekly quota delta should be measured from official percentages")
         expect(observation?.usageDelta.tokens.visibleTotalTokens == 25_000_000,
@@ -420,6 +443,7 @@ final class QuotaEfficiencyHistoryStore {
             capturedAt: reset.addingTimeInterval(-900),
             weeklyUsedPercent: 40,
             weeklyResetsAt: reset,
+            allUsage: usage(total: 61_000_000, input: 60_490_000, cached: 59_200_000, output: 510_000),
             variants: [
                 QuotaEfficiencyVariantTotal(
                     id: high0.id,
@@ -437,6 +461,24 @@ final class QuotaEfficiencyHistoryStore {
         )
         expect(store.makeObservation(previous: second, current: mixed) == nil,
                "mixed High/Max intervals should not be guessed or apportioned")
+
+        let auxiliaryMixed = QuotaEfficiencyCheckpoint(
+            capturedAt: reset.addingTimeInterval(-600),
+            weeklyUsedPercent: 35,
+            weeklyResetsAt: reset,
+            allUsage: usage(total: 55_500_000, input: 55_095_000, cached: 53_900_000, output: 405_000),
+            variants: [
+                QuotaEfficiencyVariantTotal(
+                    id: high0.id,
+                    model: high0.model,
+                    effort: high0.effort,
+                    usage: usage(total: 45_000_000, input: 44_650_000, cached: 43_700_000, output: 350_000)
+                ),
+                max1
+            ]
+        )
+        expect(store.makeObservation(previous: second, current: auxiliaryMixed) == nil,
+               "non-effort traffic must count in the dominance denominator")
 
         let summaries = store.summaries(from: [first, second])
         expect(summaries.count == 1 && summaries[0].effort == "high",
