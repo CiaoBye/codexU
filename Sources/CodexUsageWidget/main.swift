@@ -510,6 +510,7 @@ private struct SessionUsageDelta: Codable {
     let date: Date
     let tokens: TokenBreakdown
     let model: String?
+    let reasoningEffort: String?
     let serviceTier: String?
     let eventIdentity: CodexTokenEventIdentity
 }
@@ -1246,8 +1247,8 @@ final class UsageStore: ObservableObject {
 
 final class CodexUsageReader {
     private let fileManager = FileManager.default
-    private let localAnalyticsCacheVersion = 15
-    private let sessionUsageCacheVersion = 10
+    private let localAnalyticsCacheVersion = 16
+    private let sessionUsageCacheVersion = 11
     private let inferenceSampleSchemaVersion = 2
     private static let memorySessionUsageCacheLimit = 64
     private static let persistentSessionUsageCacheLimit = 1_024
@@ -2098,7 +2099,10 @@ final class CodexUsageReader {
                     )
                     dailyUsage[key] = usage
 
-                    let modelID = modelUsageIdentifier(for: model)
+                    let modelID = modelUsageIdentifier(
+                        for: model,
+                        reasoningEffort: delta.reasoningEffort
+                    )
                     var modelUsage = dailyUsageByModel[modelID] ?? [:]
                     var modelDayUsage = modelUsage[key] ?? .zero
                     modelDayUsage.add(
@@ -2108,8 +2112,11 @@ final class CodexUsageReader {
                     )
                     modelUsage[key] = modelDayUsage
                     dailyUsageByModel[modelID] = modelUsage
-                    if let model {
-                        modelNamesByID[modelID] = model
+                    if let displayName = modelUsageDisplayName(
+                        model: model,
+                        reasoningEffort: delta.reasoningEffort
+                    ) {
+                        modelNamesByID[modelID] = displayName
                     }
                 }
 
@@ -2688,6 +2695,7 @@ final class CodexUsageReader {
         var buffer = Data()
         var forkedFromId: String?
         var activeModel: String?
+        var activeReasoningEffort: String?
         var activeServiceTier: String?
         var inferenceTracker = ModelInferenceCallTracker()
         var counterState = CodexTokenCounterState()
@@ -2725,6 +2733,7 @@ final class CodexUsageReader {
                         plainFormatter: plainFormatter,
                         forkedFromId: &forkedFromId,
                         activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                         activeServiceTier: &activeServiceTier,
                         inferenceTracker: &inferenceTracker,
                         counterState: &counterState,
@@ -2759,6 +2768,7 @@ final class CodexUsageReader {
                 plainFormatter: plainFormatter,
                 forkedFromId: &forkedFromId,
                 activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                 activeServiceTier: &activeServiceTier,
                 inferenceTracker: &inferenceTracker,
                 counterState: &counterState,
@@ -2862,6 +2872,7 @@ final class CodexUsageReader {
         var buffer = data
         var forkedFromId: String?
         var activeModel: String?
+        var activeReasoningEffort: String?
         var activeServiceTier: String?
         var inferenceTracker = ModelInferenceCallTracker()
         var counterState = CodexTokenCounterState()
@@ -2889,6 +2900,7 @@ final class CodexUsageReader {
                 plainFormatter: plainFormatter,
                 forkedFromId: &forkedFromId,
                 activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                 activeServiceTier: &activeServiceTier,
                 inferenceTracker: &inferenceTracker,
                 counterState: &counterState,
@@ -2916,6 +2928,7 @@ final class CodexUsageReader {
                 plainFormatter: plainFormatter,
                 forkedFromId: &forkedFromId,
                 activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                 activeServiceTier: &activeServiceTier,
                 inferenceTracker: &inferenceTracker,
                 counterState: &counterState,
@@ -2945,6 +2958,7 @@ final class CodexUsageReader {
         plainFormatter: ISO8601DateFormatter,
         forkedFromId: inout String?,
         activeModel: inout String?,
+        activeReasoningEffort: inout String?,
         activeServiceTier: inout String?,
         inferenceTracker: inout ModelInferenceCallTracker,
         counterState: inout CodexTokenCounterState,
@@ -2984,6 +2998,9 @@ final class CodexUsageReader {
 
         if object["type"] as? String == "turn_context" {
             applyTurnContextModel(payload["model"] as? String, to: &activeModel)
+            activeReasoningEffort = normalizedReasoningEffort(
+                (payload["effort"] as? String) ?? (payload["reasoning_effort"] as? String)
+            )
             if let timestamp = object["timestamp"] as? String,
                let date = fractionalFormatter.date(from: timestamp) ?? plainFormatter.date(from: timestamp) {
                 inferenceTracker.applyTurnContext(
@@ -3060,6 +3077,7 @@ final class CodexUsageReader {
                 date: date,
                 tokens: delta,
                 model: activeModel,
+                reasoningEffort: activeReasoningEffort,
                 serviceTier: activeServiceTier,
                 eventIdentity: eventIdentity
             )
@@ -3852,6 +3870,24 @@ func applyTurnContextModel(_ turnContextModel: String?, to activeModel: inout St
 
 func modelUsageIdentifier(for model: String?) -> String {
     normalizedModelUsageName(model)?.lowercased() ?? "unrecorded-model"
+}
+
+func normalizedReasoningEffort(_ effort: String?) -> String? {
+    guard let effort else { return nil }
+    let normalized = effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? nil : normalized
+}
+
+func modelUsageIdentifier(for model: String?, reasoningEffort: String?) -> String {
+    let base = modelUsageIdentifier(for: model)
+    guard let effort = normalizedReasoningEffort(reasoningEffort) else { return base }
+    return "\(base)::effort=\(effort)"
+}
+
+func modelUsageDisplayName(model: String?, reasoningEffort: String?) -> String? {
+    guard let model = normalizedModelUsageName(model) else { return nil }
+    guard let effort = normalizedReasoningEffort(reasoningEffort) else { return model }
+    return "\(model) · \(effort)"
 }
 
 func resolvedModelUsageName(turnContextModel: String?, threadModel: String?) -> String? {
