@@ -6,8 +6,7 @@ DIST_DIR := dist
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
-SOURCES := $(shell find Sources/CodexUsageWidget -name '*.swift' | sort)
-APP_ICON := Resources/codexU.icns
+SOURCES := $(shell find Sources/CodexUsageWidget -name '*.swift' | sort)\nZSTD_SOURCE := Sources/CodexUsageWidget/Vendor/zstd/zstddeclib.c\nZSTD_OBJECT := $(BUILD_DIR)/zstddeclib.o\nBRIDGING_HEADER := Sources/CodexUsageWidget/CodexU-Bridging-Header.h\nAPP_ICON := Resources/codexU.icns
 LEADERSHIP_BADGES := $(sort $(wildcard Resources/LeadershipBadges/leadership-badge-l*.png))
 DEPLOYMENT_TARGET ?= 13.0
 HOST_ARCH := $(shell uname -m)
@@ -39,16 +38,13 @@ POWERSHELL ?= powershell.exe
 
 build: test-leadership-assets
 	rm -rf "$(APP_DIR)"
-	mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)"
-	cp Resources/Info.plist "$(APP_DIR)/Contents/Info.plist"
+	mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)"\n	xcrun --sdk macosx clang -O2 -c "$(ZSTD_SOURCE)" -o "$(ZSTD_OBJECT)" -target "$(TARGET_TRIPLE)" -mmacosx-version-min="$(DEPLOYMENT_TARGET)"\n	cp Resources/Info.plist "$(APP_DIR)/Contents/Info.plist"
 	cp "$(APP_ICON)" "$(RESOURCES_DIR)/"
 	cp Resources/*.png "$(RESOURCES_DIR)/"
 	cp -R Resources/LeadershipBadges "$(RESOURCES_DIR)/LeadershipBadges"
 	cp -R Resources/Palettes "$(RESOURCES_DIR)/Palettes"
 	/usr/bin/xattr -dr com.apple.quarantine "$(APP_DIR)" 2>/dev/null || true
-	MACOSX_DEPLOYMENT_TARGET="$(DEPLOYMENT_TARGET)" swiftc -O -parse-as-library $(SWIFTC_TARGET_FLAGS) $(SWIFTC_FEATURE_FLAGS) $(SOURCES) \
-		-o "$(MACOS_DIR)/$(APP_NAME)" \
-		-framework Cocoa \
+	MACOSX_DEPLOYMENT_TARGET="$(DEPLOYMENT_TARGET)" swiftc -O -parse-as-library $(SWIFTC_TARGET_FLAGS) $(SWIFTC_FEATURE_FLAGS) -import-objc-header "$(BRIDGING_HEADER)" $(SOURCES) "$(ZSTD_OBJECT)" \\\n\t\t-o "$(MACOS_DIR)/$(APP_NAME)" \\\n		-framework Cocoa \
 		-framework Carbon \
 		-framework SwiftUI
 	codesign $(CODESIGN_FLAGS) "$(APP_DIR)"
