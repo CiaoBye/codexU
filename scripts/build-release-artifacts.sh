@@ -20,6 +20,9 @@ make test-macos-compatibility
 make build >/dev/null
 build/codexU.app/Contents/MacOS/codexU --self-test-statistics-time-zone
 build/codexU.app/Contents/MacOS/codexU --self-test-token-counter
+build/codexU.app/Contents/MacOS/codexU --self-test-model-pricing
+build/codexU.app/Contents/MacOS/codexU --self-test-model-usage-trend
+build/codexU.app/Contents/MacOS/codexU --self-test-claude-desktop-cache
 build/codexU.app/Contents/MacOS/codexU --self-test-app-server-pipe
 build/codexU.app/Contents/MacOS/codexU --self-test-claude-skill-paths
 build/codexU.app/Contents/MacOS/codexU --self-test-status-item
