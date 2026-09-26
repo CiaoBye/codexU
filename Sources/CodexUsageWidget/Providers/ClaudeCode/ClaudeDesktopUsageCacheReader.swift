@@ -504,6 +504,61 @@ final class ClaudeDesktopUsageCacheReader {
         return nil
     }
 
+    static func selfTest() -> Bool {
+        var failures: [String] = []
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+            if !condition() { failures.append(message) }
+        }
+
+        expect(
+            usageOrganization(
+                inKey: "1/0/https://claude.ai/api/organizations/org-test/usage?skip_spend=1"
+            ) == "org-test",
+            "Claude Desktop cache key should resolve its organization"
+        )
+        expect(
+            usageOrganization(inKey: "https://example.com/api/organizations/org-test/usage") == nil,
+            "non-Claude hosts must never be treated as Claude usage cache"
+        )
+
+        let limitsJSON = """
+        {
+          "limits": [
+            {"kind":"session","percent":12.5,"resets_at":"2026-09-26T12:00:00Z"},
+            {"kind":"weekly_all","percent":34.0,"resets_at":"2026-09-30T12:00:00Z"}
+          ]
+        }
+        """
+        let limits = decodeUsageBody(Data(limitsJSON.utf8))
+        expect(abs((limits?.primary?.usedPercent ?? -1) - 12.5) < 0.000_001,
+               "session limit should decode from limits[]")
+        expect(limits?.primary?.windowDurationMins == 300,
+               "session limit should be classified as 5h")
+        expect(abs((limits?.secondary?.usedPercent ?? -1) - 34.0) < 0.000_001,
+               "weekly_all should decode from limits[]")
+        expect(limits?.secondary?.windowDurationMins == 10_080,
+               "weekly_all should be classified as 7d")
+
+        let legacyJSON = """
+        {
+          "five_hour": {"utilization": 7.0, "resets_at": "2026-09-26T13:00:00Z"},
+          "seven_day": {"utilization": 21.0, "resets_at": "2026-10-01T13:00:00Z"}
+        }
+        """
+        let legacy = decodeUsageBody(Data(legacyJSON.utf8))
+        expect(abs((legacy?.primary?.usedPercent ?? -1) - 7.0) < 0.000_001,
+               "five_hour fallback should decode")
+        expect(abs((legacy?.secondary?.usedPercent ?? -1) - 21.0) < 0.000_001,
+               "seven_day fallback should decode")
+
+        if failures.isEmpty {
+            print("Claude Desktop cache self-test passed")
+            return true
+        }
+        failures.forEach { print("Claude Desktop cache self-test failed: \($0)") }
+        return false
+    }
+
     private static let httpDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
