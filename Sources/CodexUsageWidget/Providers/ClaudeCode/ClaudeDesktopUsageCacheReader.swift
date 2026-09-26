@@ -462,7 +462,7 @@ final class ClaudeDesktopUsageCacheReader {
             }
             guard written > 0,
                   written <= output.count,
-                  ZSTD_isError(size_t(written)) == 0
+                  ZSTD_isError(written) == 0
             else {
                 return nil
             }
