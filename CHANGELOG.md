@@ -9,6 +9,7 @@
 - Codex 补齐 GPT-6 Astra / GPT-6 Sol / GPT-6 Luna 当前标准价格、缓存价格、Fast 与 >272K 长上下文估算。
 - Codex 用量趋势升级为 **模型 × reasoning effort** 归因，High / xhigh / Max 不再全部并入同一个模型曲线，便于直接比较各推理档位的 Token、缓存与 API 等效成本。
 - 用量页新增“推理档位用量表”，按选定 30/60/90/180 天范围直接展示模型 × High/xhigh/Max 的总 Token、输入、缓存、缓存命中率、输出和 API 等价值。
+- 新增“周额度效率”自动采样：把 Codex 官方 7 天已用百分比与本地模型 × reasoning effort Token 增量配对，仅在单一档位占区间 Token ≥90% 时计入样本；自动外推每 1% 额度 Token 与完整周容量，混用模型/档位的区间直接丢弃而不猜分摊。
 - 新增 `THIRD_PARTY_NOTICES.md`，记录 Zstandard BSD-3-Clause 与 Codenotch MIT 本地缓存实现参考来源。
 
 
