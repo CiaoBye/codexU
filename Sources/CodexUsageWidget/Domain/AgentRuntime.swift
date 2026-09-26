@@ -27,7 +27,7 @@ enum RuntimeScope: String, CaseIterable, Identifiable, Codable, Equatable {
         case .codex:
             return "Codex"
         case .claudeCode:
-            return "Claude Code"
+            return "Claude"
         }
     }
 }
