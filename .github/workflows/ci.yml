@@ -24,7 +24,11 @@ jobs:
       - name: Particle animation tests
         run: ./scripts/test-particle-animation.sh
       - name: Claude Desktop cache self-test
-        run: make test-claude-desktop-cache
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-claude-desktop-cache
+      - name: GPT-6 pricing and reasoning attribution tests
+        run: |
+          build/codexU.app/Contents/MacOS/codexU --self-test-model-pricing
+          build/codexU.app/Contents/MacOS/codexU --self-test-model-usage-trend
       - name: Rate limit tests
         run: ./scripts/test-rate-limits.sh
       - name: Statistics time zone tests
