@@ -4887,7 +4887,9 @@ struct UsageWidgetView: View {
             && snapshot.sevenDayQuota == nil
             && snapshot.monthlyQuota == nil
         let hasQuotaProtocolWarning = snapshot.messages.contains { $0.contains("额度窗口") }
-        return (!snapshot.messages.isEmpty && (quotaUnavailable || hasQuotaProtocolWarning || snapshot.local == nil))
+        let runtimeIsStale = store.runtimeSnapshot(for: store.selectedRuntimeScope)?.status == .stale
+        return runtimeIsStale
+            || (!snapshot.messages.isEmpty && (quotaUnavailable || hasQuotaProtocolWarning || snapshot.local == nil))
             || snapshot.account == nil
             || snapshot.local == nil
     }
@@ -4897,26 +4899,60 @@ struct UsageWidgetView: View {
         let messages = snapshot.messages.joined(separator: "\n")
 
         if store.selectedRuntimeScope == .claudeCode {
-            if snapshot.fiveHourQuota == nil || snapshot.sevenDayQuota == nil {
-                let isStale = messages.contains("快照已过期")
+            let runtime = store.runtimeSnapshot(for: .claudeCode)
+            let source = runtime?.quotaSourceLabel ?? ""
+            let desktopCacheMissing = messages.contains("未找到 Claude Desktop HTTP 缓存")
+                || messages.contains("暂无可识别的 Usage 响应")
+            let desktopCacheStale = messages.contains("Usage 本地缓存已过期")
+                || source.contains("Claude Desktop 本地缓存 · 已过期")
+            let usingStatusLine = source.contains("statusLine")
+
+            if desktopCacheStale {
                 items.append(DiagnosticItem(
-                    id: isStale ? "claude-statusline-stale" : "claude-statusline-missing",
-                    title: isStale
-                        ? language.text("Claude Code 快照已过期", "Claude Code snapshot is stale")
-                        : language.text("额度需要 Claude Code active session 快照", "Quota needs a Claude Code active session snapshot"),
-                    detail: isStale
-                        ? language.text("打开 Claude Code 后刷新；本机 token 统计仍可继续显示。", "Open Claude Code and refresh. Local token stats can still be shown.")
-                        : language.text("首版只读取本地 statusLine 快照；没有快照时 5 小时和 7 日额度显示为 --。", "This version only reads a local statusLine snapshot. 5-hour and 7-day quota show -- without it."),
-                    systemName: isStale ? "clock.badge.exclamationmark" : "waveform.path.ecg",
-                    tint: isStale ? FixedVisualPalette.statusInfo : FixedVisualPalette.statusWarning
+                    id: "claude-desktop-cache-stale",
+                    title: language.text("Claude Desktop 本地额度已过期", "Claude Desktop quota cache is stale"),
+                    detail: language.text(
+                        "codexU 保留最后一次官方读数但不会自行联网刷新。请在 Claude Desktop 打开 Settings → Usage，等待额度出现后再点刷新。",
+                        "codexU keeps the last official reading but never refreshes it over the network. Open Settings → Usage in Claude Desktop, wait for quota to appear, then refresh."
+                    ),
+                    systemName: "clock.badge.exclamationmark",
+                    tint: FixedVisualPalette.statusInfo
+                ))
+            } else if snapshot.fiveHourQuota == nil || snapshot.sevenDayQuota == nil {
+                items.append(DiagnosticItem(
+                    id: desktopCacheMissing ? "claude-desktop-cache-missing" : "claude-quota-missing",
+                    title: language.text(
+                        "尚未捕获 Claude Desktop 本地额度",
+                        "No Claude Desktop quota snapshot yet"
+                    ),
+                    detail: language.text(
+                        "在 Claude Desktop 打开 Settings → Usage。codexU 只读取官方 App 已写入本机的 Usage 缓存，不要求 Claude CLI 登录，也不会请求 Anthropic。",
+                        "Open Settings → Usage in Claude Desktop. codexU only reads the Usage response already cached by the official app; it does not require a Claude CLI login or call Anthropic."
+                    ),
+                    systemName: "internaldrive",
+                    tint: FixedVisualPalette.statusWarning
+                ))
+            } else if usingStatusLine {
+                items.append(DiagnosticItem(
+                    id: "claude-statusline-fallback",
+                    title: language.text("当前使用本地 statusLine 回退", "Using local statusLine fallback"),
+                    detail: language.text(
+                        "Claude Desktop Usage 缓存暂不可用；当前额度来自本地 statusLine 快照。打开 Claude Desktop 的 Settings → Usage 后，Desktop 缓存会重新成为首选数据源。",
+                        "Claude Desktop's Usage cache is unavailable, so quota is coming from the local statusLine snapshot. Opening Settings → Usage in Claude Desktop restores the Desktop cache as the preferred source."
+                    ),
+                    systemName: "arrow.triangle.2.circlepath",
+                    tint: FixedVisualPalette.statusInfo
                 ))
             }
 
             if snapshot.local == nil || snapshot.local?.detailedUsage == nil {
                 items.append(DiagnosticItem(
                     id: "claude-local-usage",
-                    title: language.text("暂无 Claude Code 本机用量记录", "No local Claude Code usage records yet"),
-                    detail: language.text("本机 token 统计来自 ~/.claude/projects 下的 transcript JSONL，只读取 usage 和工具名称等结构化字段。", "Local token stats come from transcript JSONL under ~/.claude/projects and only read structured usage and tool names."),
+                    title: language.text("暂无 Claude 本机 Token 记录", "No local Claude token records yet"),
+                    detail: language.text(
+                        "Token、缓存创建、缓存读取和输出统计来自 ~/.claude/projects 下的 transcript JSONL；额度读取与这些历史统计彼此独立。",
+                        "Token, cache creation, cache read, and output stats come from transcript JSONL under ~/.claude/projects; quota reading is independent from these history records."
+                    ),
                     systemName: "doc.text.magnifyingglass",
                     tint: FixedVisualPalette.statusInfo
                 ))
@@ -4926,7 +4962,7 @@ struct UsageWidgetView: View {
                 items = snapshot.messages.prefix(3).enumerated().map { index, message in
                     DiagnosticItem(
                         id: "claude-message-\(index)",
-                        title: language.text("运行提示", "Runtime note"),
+                        title: language.text("数据源提示", "Data source note"),
                         detail: localizedReaderMessage(message, language: language),
                         systemName: "info.circle.fill",
                         tint: FixedVisualPalette.statusInfo
