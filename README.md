@@ -188,6 +188,13 @@ make install
 make probe
 ```
 
+检查 Claude Desktop 本地额度读取状态（只输出脱敏诊断，不输出 organization ID、缓存文件路径或凭据）：
+
+```sh
+build/codexU.app/Contents/MacOS/codexU --diagnose-claude-desktop
+```
+
+
 ## 打包 DMG
 
 ```sh
