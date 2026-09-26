@@ -8218,8 +8218,14 @@ struct UsageTrendPanel: View {
     let language: WidgetLanguage
     @Binding var window: UsageTrendWindow
 
+    private func variantSummaries(for trend: UsageTrend) -> [ModelVariantUsageSummary] {
+        guard runtimeScope == .codex else { return [] }
+        return ModelVariantUsageSummaryBuilder.build(from: trend, window: window)
+    }
+
     var body: some View {
         if let trend {
+            let variants = variantSummaries(for: trend)
             VStack(alignment: .leading, spacing: usageTrendCardSpacing) {
                 GeometryReader { geometry in
                     HStack(alignment: .top, spacing: usageTrendCardSpacing) {
@@ -8273,9 +8279,21 @@ struct UsageTrendPanel: View {
                         window: $window
                     )
                         .frame(height: usageTrendAreaChartHeight)
+
+                    if !variants.isEmpty {
+                        ModelVariantUsageTableCard(
+                            summaries: variants,
+                            language: language,
+                            window: window
+                        )
+                        .frame(height: usageTrendVariantTableHeight)
+                    }
                 }
             }
-            .frame(height: usageTrendPanelHeight(showsModelAreaChart: showsModelAttribution(for: trend)))
+            .frame(height: usageTrendPanelHeight(
+                showsModelAreaChart: showsModelAttribution(for: trend),
+                showsVariantTable: !variants.isEmpty
+            ))
         } else {
             AnalyticsEmptyState(
                 systemName: "chart.bar.doc.horizontal",
@@ -8634,6 +8652,122 @@ struct ModelUsageAreaChartCard: View {
             "选择模型面积图的日期范围；数据最多可回溯半年。",
             "Choose the model area chart range; data is available for up to six months."
         )
+    }
+}
+
+private struct ModelVariantUsageTableCard: View {
+    let summaries: [ModelVariantUsageSummary]
+    let language: WidgetLanguage
+    let window: UsageTrendWindow
+
+    private var visibleSummaries: [ModelVariantUsageSummary] {
+        Array(summaries.prefix(8))
+    }
+
+    var body: some View {
+        DashboardCard {
+            VStack(alignment: .leading, spacing: dashboardCardContentSpacing) {
+                DashboardCardHeader(
+                    title: language.text("推理档位用量", "Reasoning effort usage"),
+                    systemName: "slider.horizontal.3"
+                ) {
+                    InfoChip(
+                        title: language.text("范围", "Range"),
+                        value: language.text("最近 \(window.dayCount) 天", "Last \(window.dayCount) days")
+                    )
+                }
+
+                tableHeader
+
+                VStack(spacing: 0) {
+                    ForEach(visibleSummaries) { row in
+                        tableRow(row)
+                        if row.id != visibleSummaries.last?.id {
+                            Divider()
+                                .opacity(0.45)
+                        }
+                    }
+                }
+
+                if summaries.count > visibleSummaries.count {
+                    Text(language.text(
+                        "仅展示用量最高的 \(visibleSummaries.count) 个模型 × 推理档位组合。",
+                        "Showing the top \(visibleSummaries.count) model × reasoning-effort combinations."
+                    ))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    private var tableHeader: some View {
+        HStack(spacing: 8) {
+            headerText(language.text("模型 / 档位", "Model / effort"), width: nil, alignment: .leading)
+            headerText(language.text("总 Token", "Total"), width: 82)
+            headerText(language.text("输入", "Input"), width: 82)
+            headerText(language.text("缓存", "Cached"), width: 82)
+            headerText(language.text("命中", "Hit"), width: 62)
+            headerText(language.text("输出", "Output"), width: 76)
+            headerText(language.text("API 等价", "API eq."), width: 76)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func tableRow(_ row: ModelVariantUsageSummary) -> some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 7) {
+                Text(row.model)
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Text(row.effort.uppercased())
+                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(FixedVisualPalette.surfaceTrack.opacity(0.72))
+                    )
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            valueText(formatTokens(row.usage.tokens.visibleTotalTokens), width: 82)
+            valueText(formatTokens(row.usage.tokens.inputTokens), width: 82)
+            valueText(formatTokens(row.usage.tokens.billableCachedInputTokens), width: 82)
+            valueText(row.cacheHitPercent.map { String(format: "%.1f%%", $0) } ?? "--", width: 62)
+            valueText(formatTokens(row.usage.tokens.outputTokens), width: 76)
+            valueText(
+                row.usage.estimatedCostUSD > 0 ? formatUSD(row.usage.estimatedCostUSD) : "--",
+                width: 76
+            )
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func headerText(
+        _ text: String,
+        width: CGFloat?,
+        alignment: Alignment = .trailing
+    ) -> some View {
+        Text(text)
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: width == nil ? .infinity : nil, alignment: alignment)
+            .frame(width: width, alignment: alignment)
+    }
+
+    private func valueText(_ text: String, width: CGFloat) -> some View {
+        Text(text)
+            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .frame(width: width, alignment: .trailing)
     }
 }
 
@@ -10717,6 +10851,7 @@ private let settingsShortcutActionWidth: CGFloat = settingsAccessoryColumnWidth
 private let usageTrendCardHeight: CGFloat = 214
 private let usageTrendCardSpacing: CGFloat = dashboardGridSpacing
 private let usageTrendAreaChartHeight: CGFloat = 344
+private let usageTrendVariantTableHeight: CGFloat = 238
 private let usageTrendAreaPlotHeight: CGFloat = 210
 private let usageTrendAreaAxisHeight: CGFloat = 16
 private let usageTrendLegendHeight: CGFloat = 18
@@ -10822,9 +10957,13 @@ private func usageTrendSevenDayCardWidth(containerWidth: CGFloat, weekCount: Int
     )
 }
 
-private func usageTrendPanelHeight(showsModelAreaChart: Bool) -> CGFloat {
+private func usageTrendPanelHeight(
+    showsModelAreaChart: Bool,
+    showsVariantTable: Bool = false
+) -> CGFloat {
     usageTrendCardHeight
         + (showsModelAreaChart ? usageTrendCardSpacing + usageTrendAreaChartHeight : 0)
+        + (showsVariantTable ? usageTrendCardSpacing + usageTrendVariantTableHeight : 0)
 }
 
 private func localizedDashboardTitle(_ tab: DashboardTab, language: WidgetLanguage) -> String {
