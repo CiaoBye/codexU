@@ -9,7 +9,7 @@ final class GitHubReleaseUpdateChecker {
     private let cacheSchemaVersion = 1
 
     init(
-        owner: String = "shanggqm",
+        owner: String = "CiaoBye",
         repo: String = "codexU",
         cacheDirectory: URL = RuntimeLoadContext.live().cacheDirectory,
         session: URLSession = .shared,
