@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   macos:
     runs-on: macos-14
@@ -14,15 +18,24 @@ jobs:
       - name: Build
         run: make build
       - name: Palette package and rendering tests
-        run: ./scripts/test-palettes.sh
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-palettes
       - name: Menu bar rendering tests
-        run: ./scripts/test-status-item.sh
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-status-item
       - name: Particle animation tests
-        run: ./scripts/test-particle-animation.sh
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-particle-animation
+      - name: Claude Desktop cache self-test
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-claude-desktop-cache
+      - name: Claude recent projects self-test
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-claude-recent-projects
+      - name: GPT-6 pricing, reasoning attribution, and quota efficiency tests
+        run: |
+          build/codexU.app/Contents/MacOS/codexU --self-test-model-pricing
+          build/codexU.app/Contents/MacOS/codexU --self-test-model-usage-trend
+          build/codexU.app/Contents/MacOS/codexU --self-test-quota-efficiency
       - name: Rate limit tests
-        run: ./scripts/test-rate-limits.sh
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-rate-limits
       - name: Statistics time zone tests
-        run: ./scripts/test-statistics-time-zone.sh
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-statistics-time-zone
 
   windows-rust-format:
     runs-on: windows-latest
@@ -58,3 +71,24 @@ jobs:
         run: npm run build
       - name: Test Windows Web contracts
         run: npm run test:contracts
+
+
+  beta-package:
+    if: github.event_name == 'pull_request'
+    needs: macos
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build coexistence-safe Apple Silicon beta
+        run: make dev-dmg-arm64
+      - name: Create checksum
+        run: shasum -a 256 dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg > dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg.sha256
+      - name: Upload beta artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codexu-next-1.4.0-beta.1-macos-arm64
+          path: |
+            dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg
+            dist-next/codexUNext-1.4.0-beta.1-mac-arm64.dmg.sha256
+          if-no-files-found: error

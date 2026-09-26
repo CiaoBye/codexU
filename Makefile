@@ -1,12 +1,25 @@
-APP_NAME := codexU
-DISPLAY_NAME := codexU
-VERSION := $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist 2>/dev/null || echo 0.1.0)
-BUILD_DIR := build
-DIST_DIR := dist
+APP_NAME ?= codexU
+DISPLAY_NAME ?= codexU
+BUNDLE_IDENTIFIER ?= com.guomeiqing.codexu
+VERSION ?= $(shell /usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist 2>/dev/null || echo 0.1.0)
+BUILD_NUMBER ?= $(shell /usr/libexec/PlistBuddy -c "Print CFBundleVersion" Resources/Info.plist 2>/dev/null || echo 1)
+BUILD_DIR ?= build
+DIST_DIR ?= dist
+
+DEV_APP_NAME ?= codexUNext
+DEV_DISPLAY_NAME ?= codexU Next
+DEV_BUNDLE_IDENTIFIER ?= com.ciaobye.codexu.next
+DEV_VERSION ?= 1.4.0-beta.1
+DEV_BUILD_NUMBER ?= 29
+DEV_BUILD_DIR ?= build-next
+DEV_DIST_DIR ?= dist-next
 APP_DIR := $(BUILD_DIR)/$(APP_NAME).app
 MACOS_DIR := $(APP_DIR)/Contents/MacOS
 RESOURCES_DIR := $(APP_DIR)/Contents/Resources
 SOURCES := $(shell find Sources/CodexUsageWidget -name '*.swift' | sort)
+ZSTD_SOURCE := Sources/CodexUsageWidget/Vendor/zstd/zstddeclib.c
+ZSTD_OBJECT := $(BUILD_DIR)/zstddeclib.o
+BRIDGING_HEADER := Sources/CodexUsageWidget/CodexU-Bridging-Header.h
 APP_ICON := Resources/codexU.icns
 LEADERSHIP_BADGES := $(sort $(wildcard Resources/LeadershipBadges/leadership-badge-l*.png))
 DEPLOYMENT_TARGET ?= 13.0
@@ -35,18 +48,25 @@ endif
 
 POWERSHELL ?= powershell.exe
 
-.PHONY: build run probe test-rate-limits test-statistics-time-zone test-token-counter test-model-pricing test-model-usage-trend test-model-inference-performance test-app-server-pipe test-task-runtime test-leadership-model test-leadership-assets test-claude-skill-paths test-codex-session-link test-performance-monitor test-phase-one-gate test-particle-animation test-palettes test-macos-compatibility memory-risk-check phase-one-check phase-one-soak install dmg dmg-arm64 dmg-intel checksum checksum-arm64 checksum-intel release release-arm64 release-intel release-all release-package release-windows release-cross-platform-check release-check notarize verify clean clean-dist
+.PHONY: build dev-build dev-run dev-install dev-dmg-arm64 run probe test-claude-desktop-cache test-rate-limits test-statistics-time-zone test-token-counter test-model-pricing test-model-usage-trend test-model-inference-performance test-app-server-pipe test-task-runtime test-leadership-model test-leadership-assets test-claude-skill-paths test-codex-session-link test-performance-monitor test-phase-one-gate test-particle-animation test-palettes test-macos-compatibility memory-risk-check phase-one-check phase-one-soak install dmg dmg-arm64 dmg-intel checksum checksum-arm64 checksum-intel release release-arm64 release-intel release-all release-package release-windows release-cross-platform-check release-check notarize verify clean clean-dist
 
 build: test-leadership-assets
 	rm -rf "$(APP_DIR)"
 	mkdir -p "$(MACOS_DIR)" "$(RESOURCES_DIR)"
+	xcrun --sdk macosx clang -O2 -c "$(ZSTD_SOURCE)" -o "$(ZSTD_OBJECT)" -target "$(TARGET_TRIPLE)" -mmacosx-version-min="$(DEPLOYMENT_TARGET)"
 	cp Resources/Info.plist "$(APP_DIR)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $(DISPLAY_NAME)" "$(APP_DIR)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $(APP_NAME)" "$(APP_DIR)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $(BUNDLE_IDENTIFIER)" "$(APP_DIR)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleName $(APP_NAME)" "$(APP_DIR)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" "$(APP_DIR)/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(BUILD_NUMBER)" "$(APP_DIR)/Contents/Info.plist"
 	cp "$(APP_ICON)" "$(RESOURCES_DIR)/"
 	cp Resources/*.png "$(RESOURCES_DIR)/"
 	cp -R Resources/LeadershipBadges "$(RESOURCES_DIR)/LeadershipBadges"
 	cp -R Resources/Palettes "$(RESOURCES_DIR)/Palettes"
 	/usr/bin/xattr -dr com.apple.quarantine "$(APP_DIR)" 2>/dev/null || true
-	MACOSX_DEPLOYMENT_TARGET="$(DEPLOYMENT_TARGET)" swiftc -O -parse-as-library $(SWIFTC_TARGET_FLAGS) $(SWIFTC_FEATURE_FLAGS) $(SOURCES) \
+	MACOSX_DEPLOYMENT_TARGET="$(DEPLOYMENT_TARGET)" swiftc -O -parse-as-library $(SWIFTC_TARGET_FLAGS) $(SWIFTC_FEATURE_FLAGS) -import-objc-header "$(BRIDGING_HEADER)" $(SOURCES) "$(ZSTD_OBJECT)" \
 		-o "$(MACOS_DIR)/$(APP_NAME)" \
 		-framework Cocoa \
 		-framework Carbon \
@@ -54,11 +74,44 @@ build: test-leadership-assets
 	codesign $(CODESIGN_FLAGS) "$(APP_DIR)"
 	codesign --verify --deep --strict "$(APP_DIR)"
 
+
+dev-build:
+	$(MAKE) build \
+		APP_NAME="$(DEV_APP_NAME)" \
+		DISPLAY_NAME="$(DEV_DISPLAY_NAME)" \
+		BUNDLE_IDENTIFIER="$(DEV_BUNDLE_IDENTIFIER)" \
+		VERSION="$(DEV_VERSION)" \
+		BUILD_NUMBER="$(DEV_BUILD_NUMBER)" \
+		BUILD_DIR="$(DEV_BUILD_DIR)" \
+		DIST_DIR="$(DEV_DIST_DIR)"
+
+dev-run: dev-build
+	open "$(DEV_BUILD_DIR)/$(DEV_APP_NAME).app"
+
+dev-install: dev-build
+	rm -rf "/Applications/$(DEV_APP_NAME).app"
+	cp -R "$(DEV_BUILD_DIR)/$(DEV_APP_NAME).app" "/Applications/$(DEV_APP_NAME).app"
+	open "/Applications/$(DEV_APP_NAME).app"
+
+dev-dmg-arm64:
+	$(MAKE) dmg \
+		APP_NAME="$(DEV_APP_NAME)" \
+		DISPLAY_NAME="$(DEV_DISPLAY_NAME)" \
+		BUNDLE_IDENTIFIER="$(DEV_BUNDLE_IDENTIFIER)" \
+		VERSION="$(DEV_VERSION)" \
+		BUILD_NUMBER="$(DEV_BUILD_NUMBER)" \
+		BUILD_DIR="$(DEV_BUILD_DIR)" \
+		DIST_DIR="$(DEV_DIST_DIR)" \
+		TARGET_TRIPLE="$(APPLE_SILICON_TARGET_TRIPLE)"
+
 run: build
 	open "$(APP_DIR)"
 
 probe: build
 	"$(MACOS_DIR)/$(APP_NAME)" --dump-json
+
+test-claude-desktop-cache: build
+	"$(MACOS_DIR)/$(APP_NAME)" --self-test-claude-desktop-cache
 
 test-rate-limits:
 	./scripts/test-rate-limits.sh

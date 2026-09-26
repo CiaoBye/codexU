@@ -510,6 +510,7 @@ private struct SessionUsageDelta: Codable {
     let date: Date
     let tokens: TokenBreakdown
     let model: String?
+    let reasoningEffort: String?
     let serviceTier: String?
     let eventIdentity: CodexTokenEventIdentity
 }
@@ -738,6 +739,8 @@ final class UsageStore: ObservableObject {
     @Published private(set) var visualEnergyMode: VisualEnergyMode = .suspended
     @Published private(set) var codexLiveTasks: CodexTaskLiveSnapshot = .disconnected
     @Published private(set) var taskFocusRequest: TaskFocusRequest?
+    @Published private(set) var quotaEfficiencySummaries: [QuotaEfficiencyVariantSummary] =
+        QuotaEfficiencyHistoryStore.shared.loadSummaries()
 
     private var fullTimer: Timer?
     private var taskBoardTimer: Timer?
@@ -1203,6 +1206,12 @@ final class UsageStore: ObservableObject {
         runtimeSnapshots = displayedRuntimes
         selectedRuntimeScope = nextScope
         snapshot = reconciledSnapshot.displaySnapshot(for: nextScope)
+        if let codexRuntime = displayedRuntimes.first(where: { $0.scope == .codex }) {
+            quotaEfficiencySummaries = QuotaEfficiencyHistoryStore.shared.record(
+                runtime: codexRuntime,
+                at: multiSnapshot.refreshedAt
+            )
+        }
     }
 
     private func applyTaskBoard(_ taskBoard: TaskBoard?, for scope: RuntimeScope) {
@@ -1246,8 +1255,8 @@ final class UsageStore: ObservableObject {
 
 final class CodexUsageReader {
     private let fileManager = FileManager.default
-    private let localAnalyticsCacheVersion = 15
-    private let sessionUsageCacheVersion = 10
+    private let localAnalyticsCacheVersion = 17
+    private let sessionUsageCacheVersion = 11
     private let inferenceSampleSchemaVersion = 2
     private static let memorySessionUsageCacheLimit = 64
     private static let persistentSessionUsageCacheLimit = 1_024
@@ -2098,7 +2107,10 @@ final class CodexUsageReader {
                     )
                     dailyUsage[key] = usage
 
-                    let modelID = modelUsageIdentifier(for: model)
+                    let modelID = modelUsageIdentifier(
+                        for: model,
+                        reasoningEffort: delta.reasoningEffort
+                    )
                     var modelUsage = dailyUsageByModel[modelID] ?? [:]
                     var modelDayUsage = modelUsage[key] ?? .zero
                     modelDayUsage.add(
@@ -2108,8 +2120,11 @@ final class CodexUsageReader {
                     )
                     modelUsage[key] = modelDayUsage
                     dailyUsageByModel[modelID] = modelUsage
-                    if let model {
-                        modelNamesByID[modelID] = model
+                    if let displayName = modelUsageDisplayName(
+                        model: model,
+                        reasoningEffort: delta.reasoningEffort
+                    ) {
+                        modelNamesByID[modelID] = displayName
                     }
                 }
 
@@ -2197,6 +2212,7 @@ final class CodexUsageReader {
                 sevenDayStart: sevenDayStart,
                 trendStart: trendStart,
                 monthStart: monthStart,
+                calendar: calendar,
                 sourceQuality: .detailed,
                 modelDailyUsage: dailyUsageByModel,
                 modelNamesByID: modelNamesByID
@@ -2229,11 +2245,11 @@ final class CodexUsageReader {
         sevenDayStart: Date,
         trendStart: Date,
         monthStart: Date,
+        calendar: Calendar,
         sourceQuality: UsageSourceQuality,
         modelDailyUsage: [String: [String: PricedTokenUsage]] = [:],
         modelNamesByID: [String: String] = [:]
     ) -> UsageTrend {
-        let calendar = Calendar.current
         var buckets: [UsageDayBucket] = []
         var cursor = calendar.startOfDay(for: trendStart)
         let end = calendar.startOfDay(for: dayStart)
@@ -2310,6 +2326,7 @@ final class CodexUsageReader {
                 sevenDayStart: sevenDayStart,
                 trendStart: trendStart,
                 monthStart: monthStart,
+                calendar: calendar,
                 sourceQuality: sourceQuality
             )
             guard modelTrend.activeDayCount > 0 else { return nil }
@@ -2348,6 +2365,44 @@ final class CodexUsageReader {
             activeDayCount: buckets.filter { $0.tokens > 0 }.count,
             sourceQuality: sourceQuality
         )
+    }
+
+    static func selfTestUsageTrendTimeZone() -> Bool {
+        let reference = Date(timeIntervalSince1970: 1_767_312_000)
+        let systemOffset = TimeZone.current.secondsFromGMT(for: reference)
+        let testOffset = systemOffset == 14 * 3_600 ? -12 * 3_600 : 14 * 3_600
+        guard let timeZone = TimeZone(secondsFromGMT: testOffset) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        guard let dayStart = calendar.date(from: DateComponents(year: 2026, month: 1, day: 2)) else {
+            return false
+        }
+        let key = localDayKey(dayStart, calendar: calendar)
+        let usage = PricedTokenUsage(
+            tokens: TokenBreakdown(
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 100
+            ),
+            estimatedCostUSD: 0
+        )
+        let trend = CodexUsageReader().makeUsageTrend(
+            dailyUsage: [key: usage],
+            dayStart: dayStart,
+            sevenDayStart: dayStart,
+            trendStart: dayStart,
+            monthStart: dayStart,
+            calendar: calendar,
+            sourceQuality: .detailed,
+            modelDailyUsage: ["test::effort=high": [key: usage]]
+        )
+        let valid = trend.dayBuckets.last?.usage.tokens.visibleTotalTokens == 100
+            && trend.modelTrends?.first?.dayBuckets.last?.usage.tokens.visibleTotalTokens == 100
+            && trend.summary.sevenDay.tokens.visibleTotalTokens == 100
+        if !valid { print("usage trend time-zone self-test failed") }
+        return valid
     }
 
     private func makeHeatmapData(
@@ -2476,6 +2531,7 @@ final class CodexUsageReader {
             sevenDayStart: sevenDayStart,
             trendStart: trendStart,
             monthStart: monthStart,
+            calendar: calendar,
             sourceQuality: .approximate,
             modelDailyUsage: dailyUsageByModel,
             modelNamesByID: modelNamesByID
@@ -2688,6 +2744,7 @@ final class CodexUsageReader {
         var buffer = Data()
         var forkedFromId: String?
         var activeModel: String?
+        var activeReasoningEffort: String?
         var activeServiceTier: String?
         var inferenceTracker = ModelInferenceCallTracker()
         var counterState = CodexTokenCounterState()
@@ -2725,6 +2782,7 @@ final class CodexUsageReader {
                         plainFormatter: plainFormatter,
                         forkedFromId: &forkedFromId,
                         activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                         activeServiceTier: &activeServiceTier,
                         inferenceTracker: &inferenceTracker,
                         counterState: &counterState,
@@ -2759,6 +2817,7 @@ final class CodexUsageReader {
                 plainFormatter: plainFormatter,
                 forkedFromId: &forkedFromId,
                 activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                 activeServiceTier: &activeServiceTier,
                 inferenceTracker: &inferenceTracker,
                 counterState: &counterState,
@@ -2862,6 +2921,7 @@ final class CodexUsageReader {
         var buffer = data
         var forkedFromId: String?
         var activeModel: String?
+        var activeReasoningEffort: String?
         var activeServiceTier: String?
         var inferenceTracker = ModelInferenceCallTracker()
         var counterState = CodexTokenCounterState()
@@ -2889,6 +2949,7 @@ final class CodexUsageReader {
                 plainFormatter: plainFormatter,
                 forkedFromId: &forkedFromId,
                 activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                 activeServiceTier: &activeServiceTier,
                 inferenceTracker: &inferenceTracker,
                 counterState: &counterState,
@@ -2916,6 +2977,7 @@ final class CodexUsageReader {
                 plainFormatter: plainFormatter,
                 forkedFromId: &forkedFromId,
                 activeModel: &activeModel,
+                        activeReasoningEffort: &activeReasoningEffort,
                 activeServiceTier: &activeServiceTier,
                 inferenceTracker: &inferenceTracker,
                 counterState: &counterState,
@@ -2945,6 +3007,7 @@ final class CodexUsageReader {
         plainFormatter: ISO8601DateFormatter,
         forkedFromId: inout String?,
         activeModel: inout String?,
+        activeReasoningEffort: inout String?,
         activeServiceTier: inout String?,
         inferenceTracker: inout ModelInferenceCallTracker,
         counterState: inout CodexTokenCounterState,
@@ -2984,6 +3047,9 @@ final class CodexUsageReader {
 
         if object["type"] as? String == "turn_context" {
             applyTurnContextModel(payload["model"] as? String, to: &activeModel)
+            activeReasoningEffort = normalizedReasoningEffort(
+                (payload["effort"] as? String) ?? (payload["reasoning_effort"] as? String)
+            )
             if let timestamp = object["timestamp"] as? String,
                let date = fractionalFormatter.date(from: timestamp) ?? plainFormatter.date(from: timestamp) {
                 inferenceTracker.applyTurnContext(
@@ -3060,6 +3126,7 @@ final class CodexUsageReader {
                 date: date,
                 tokens: delta,
                 model: activeModel,
+                reasoningEffort: activeReasoningEffort,
                 serviceTier: activeServiceTier,
                 eventIdentity: eventIdentity
             )
@@ -3347,7 +3414,7 @@ final class CodexUsageReader {
             return nil
         }
         return caches
-            .appendingPathComponent("codexU", isDirectory: true)
+            .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
             .appendingPathComponent("local-analytics-v2.json")
     }
 
@@ -3356,7 +3423,7 @@ final class CodexUsageReader {
             return nil
         }
         return caches
-            .appendingPathComponent("codexU", isDirectory: true)
+            .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
             .appendingPathComponent("session-usage-v1.json")
     }
 
@@ -3668,13 +3735,52 @@ func estimateStaticTokens(_ text: String) -> Int64 {
 private func modelTokenPrice(for model: String?) -> ModelTokenPrice {
     let normalized = (model ?? "").lowercased()
 
+    if normalized.contains("gpt-6-astra") {
+        return ModelTokenPrice(
+            model: "gpt-6-astra",
+            inputPerMillion: 10,
+            cachedInputPerMillion: 1,
+            outputPerMillion: 50,
+            cacheWriteInputPerMillion: 12.5,
+            fastModeMultiplier: 2,
+            longContextInputMultiplier: 2,
+            longContextOutputMultiplier: 1.5,
+            usesReferencePricing: false
+        )
+    }
+    if normalized.contains("gpt-6-sol") {
+        return ModelTokenPrice(
+            model: "gpt-6-sol",
+            inputPerMillion: 2,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 10,
+            cacheWriteInputPerMillion: 2.5,
+            fastModeMultiplier: 2,
+            longContextInputMultiplier: 2,
+            longContextOutputMultiplier: 1.5,
+            usesReferencePricing: false
+        )
+    }
+    if normalized.contains("gpt-6-luna") {
+        return ModelTokenPrice(
+            model: "gpt-6-luna",
+            inputPerMillion: 0.1,
+            cachedInputPerMillion: 0.01,
+            outputPerMillion: 0.5,
+            cacheWriteInputPerMillion: 0.125,
+            fastModeMultiplier: 2,
+            longContextInputMultiplier: 2,
+            longContextOutputMultiplier: 1.5,
+            usesReferencePricing: false
+        )
+    }
     if normalized.contains("gpt-5.6-sol") || normalized == "gpt-5.6" {
         return ModelTokenPrice(
             model: "gpt-5.6-sol",
-            inputPerMillion: 5,
-            cachedInputPerMillion: 0.5,
-            outputPerMillion: 30,
-            cacheWriteInputPerMillion: 6.25,
+            inputPerMillion: 4,
+            cachedInputPerMillion: 0.4,
+            outputPerMillion: 20,
+            cacheWriteInputPerMillion: 5,
             fastModeMultiplier: 2,
             longContextInputMultiplier: 2,
             longContextOutputMultiplier: 1.5,
@@ -3815,6 +3921,24 @@ func modelUsageIdentifier(for model: String?) -> String {
     normalizedModelUsageName(model)?.lowercased() ?? "unrecorded-model"
 }
 
+func normalizedReasoningEffort(_ effort: String?) -> String? {
+    guard let effort else { return nil }
+    let normalized = effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? nil : normalized
+}
+
+func modelUsageIdentifier(for model: String?, reasoningEffort: String?) -> String {
+    let base = modelUsageIdentifier(for: model)
+    guard let effort = normalizedReasoningEffort(reasoningEffort) else { return base }
+    return "\(base)::effort=\(effort)"
+}
+
+func modelUsageDisplayName(model: String?, reasoningEffort: String?) -> String? {
+    guard let model = normalizedModelUsageName(model) else { return nil }
+    guard let effort = normalizedReasoningEffort(reasoningEffort) else { return model }
+    return "\(model) · \(effort)"
+}
+
 func resolvedModelUsageName(turnContextModel: String?, threadModel: String?) -> String? {
     normalizedModelUsageName(turnContextModel) ?? normalizedModelUsageName(threadModel)
 }
@@ -3881,6 +4005,9 @@ private enum ModelPricingSelfTest {
             reasoningOutputTokens: 0,
             totalTokens: 110_000
         )
+        let astra6 = modelTokenPrice(for: "gpt-6-astra")
+        let sol6 = modelTokenPrice(for: "gpt-6-sol")
+        let luna6 = modelTokenPrice(for: "GPT-6-LUNA")
         let sol = modelTokenPrice(for: "gpt-5.6")
         let terra = modelTokenPrice(for: "gpt-5.6-terra-2026-02-16")
         let luna = modelTokenPrice(for: "GPT-5.6-LUNA")
@@ -3890,11 +4017,17 @@ private enum ModelPricingSelfTest {
         let gpt53Codex = modelTokenPrice(for: "gpt-5.3-codex")
         let spark = modelTokenPrice(for: "gpt-5.3-codex-spark")
 
+        expect(astra6.model == "gpt-6-astra" && !astra6.usesReferencePricing, "GPT-6 Astra should use explicit pricing")
+        expect(sol6.model == "gpt-6-sol" && !sol6.usesReferencePricing, "GPT-6 Sol should use explicit pricing")
+        expect(luna6.model == "gpt-6-luna" && !luna6.usesReferencePricing, "GPT-6 Luna should use explicit pricing")
+        expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: astra6), 1.14), "GPT-6 Astra should use current standard rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: sol6), 0.228), "GPT-6 Sol should use current standard rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: luna6), 0.0114), "GPT-6 Luna should use current standard rates")
         expect(sol.model == "gpt-5.6-sol", "gpt-5.6 should resolve to gpt-5.6-sol")
         expect(!sol.usesReferencePricing, "gpt-5.6 should use an explicit price")
         expect(terra.model == "gpt-5.6-terra", "terra snapshots should preserve the terra price")
         expect(luna.model == "gpt-5.6-luna", "luna matching should be case-insensitive")
-        expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: sol), 0.62), "Sol cached input estimate should use the split rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: sol), 0.456), "GPT-5.6 Sol should use current standard rates")
         expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: terra), 0.248), "Terra should use the official standard API rates")
         expect(nearlyEqual(estimatedCostUSD(tokens: sampleTokens, price: luna), 0.0248), "Luna should use the official standard API rates")
         expect(nearlyEqual(gpt55.inputPerMillion, 5) && nearlyEqual(gpt55.cachedInputPerMillion, 0.5) && nearlyEqual(gpt55.outputPerMillion, 30), "GPT-5.5 should use the official standard API rates")
@@ -3911,8 +4044,10 @@ private enum ModelPricingSelfTest {
             reasoningOutputTokens: 0,
             totalTokens: 110_000
         )
-        expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: sol), 0.6325), "GPT-5.6 cache writes should use the 1.25x write rate")
-        expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: sol, serviceTier: "priority"), 1.265), "GPT-5.6 Fast mode should use the published 2x API rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: sol6), 0.233), "GPT-6 Sol cache writes should use the published write rate")
+        expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: sol6, serviceTier: "priority"), 0.466), "GPT-6 Sol Fast mode should use the published 2x API rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: sol), 0.466), "GPT-5.6 cache writes should use the current write rate")
+        expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: sol, serviceTier: "priority"), 0.932), "GPT-5.6 Fast mode should use the published 2x API rates")
         expect(nearlyEqual(estimatedCostUSD(tokens: cacheWriteTokens, price: gpt55, serviceTier: "fast"), 1.55), "GPT-5.5 Fast mode should use the published 2.5x API rates")
 
         let longContextTokens = TokenBreakdown(
@@ -3923,8 +4058,10 @@ private enum ModelPricingSelfTest {
             reasoningOutputTokens: 0,
             totalTokens: 400_000
         )
-        expect(nearlyEqual(estimatedCostUSD(tokens: longContextTokens, price: sol), 6.85), "GPT-5.6 long context should use 2x input and 1.5x output rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: longContextTokens, price: sol6), 2.44), "GPT-6 Sol long context should use 2x input and 1.5x output rates")
+        expect(nearlyEqual(estimatedCostUSD(tokens: longContextTokens, price: sol), 4.88), "GPT-5.6 long context should use 2x input and 1.5x output rates")
         expect(isFastServiceTier("priority") && isFastServiceTier("FAST") && !isFastServiceTier("default"), "service tier normalization should distinguish Fast mode")
+        expect(!modelUsageUsesReferencePricing("gpt-6-sol"), "known GPT-6 models should not use reference pricing")
         expect(!modelUsageUsesReferencePricing("gpt-5.6-luna"), "known GPT-5.6 models should not use reference pricing")
         expect(modelUsageUsesReferencePricing("gpt-5.3-codex-spark"), "Codex Spark should not inherit GPT-5.3 Codex pricing")
         expect(modelUsageUsesReferencePricing("future-model"), "unknown models should retain reference pricing")
@@ -4673,6 +4810,7 @@ struct UsageWidgetView: View {
                 trend: snapshot.local?.usageTrend,
                 runtimeScope: store.selectedRuntimeScope,
                 language: language,
+                efficiencySummaries: store.quotaEfficiencySummaries,
                 window: $settings.usageTrendWindow
             )
         case .inference:
@@ -4684,6 +4822,7 @@ struct UsageWidgetView: View {
         case .projects:
             ProjectBoardPanel(
                 projectBoard: snapshot.local?.projectBoard,
+                runtimeScope: store.selectedRuntimeScope,
                 language: language
             )
         case .skills:
@@ -4799,7 +4938,9 @@ struct UsageWidgetView: View {
             && snapshot.sevenDayQuota == nil
             && snapshot.monthlyQuota == nil
         let hasQuotaProtocolWarning = snapshot.messages.contains { $0.contains("额度窗口") }
-        return (!snapshot.messages.isEmpty && (quotaUnavailable || hasQuotaProtocolWarning || snapshot.local == nil))
+        let runtimeIsStale = store.runtimeSnapshot(for: store.selectedRuntimeScope)?.status == .stale
+        return runtimeIsStale
+            || (!snapshot.messages.isEmpty && (quotaUnavailable || hasQuotaProtocolWarning || snapshot.local == nil))
             || snapshot.account == nil
             || snapshot.local == nil
     }
@@ -4809,26 +4950,60 @@ struct UsageWidgetView: View {
         let messages = snapshot.messages.joined(separator: "\n")
 
         if store.selectedRuntimeScope == .claudeCode {
-            if snapshot.fiveHourQuota == nil || snapshot.sevenDayQuota == nil {
-                let isStale = messages.contains("快照已过期")
+            let runtime = store.runtimeSnapshot(for: .claudeCode)
+            let source = runtime?.quotaSourceLabel ?? ""
+            let desktopCacheMissing = messages.contains("未找到 Claude Desktop HTTP 缓存")
+                || messages.contains("暂无可识别的 Usage 响应")
+            let desktopCacheStale = messages.contains("Usage 本地缓存已过期")
+                || source.contains("Claude Desktop 本地缓存 · 已过期")
+            let usingStatusLine = source.contains("statusLine")
+
+            if desktopCacheStale {
                 items.append(DiagnosticItem(
-                    id: isStale ? "claude-statusline-stale" : "claude-statusline-missing",
-                    title: isStale
-                        ? language.text("Claude Code 快照已过期", "Claude Code snapshot is stale")
-                        : language.text("额度需要 Claude Code active session 快照", "Quota needs a Claude Code active session snapshot"),
-                    detail: isStale
-                        ? language.text("打开 Claude Code 后刷新；本机 token 统计仍可继续显示。", "Open Claude Code and refresh. Local token stats can still be shown.")
-                        : language.text("首版只读取本地 statusLine 快照；没有快照时 5 小时和 7 日额度显示为 --。", "This version only reads a local statusLine snapshot. 5-hour and 7-day quota show -- without it."),
-                    systemName: isStale ? "clock.badge.exclamationmark" : "waveform.path.ecg",
-                    tint: isStale ? FixedVisualPalette.statusInfo : FixedVisualPalette.statusWarning
+                    id: "claude-desktop-cache-stale",
+                    title: language.text("Claude Desktop 本地额度已过期", "Claude Desktop quota cache is stale"),
+                    detail: language.text(
+                        "codexU 保留最后一次官方读数但不会自行联网刷新。请在 Claude Desktop 打开 Settings → Usage，等待额度出现后再点刷新。",
+                        "codexU keeps the last official reading but never refreshes it over the network. Open Settings → Usage in Claude Desktop, wait for quota to appear, then refresh."
+                    ),
+                    systemName: "clock.badge.exclamationmark",
+                    tint: FixedVisualPalette.statusInfo
+                ))
+            } else if snapshot.fiveHourQuota == nil || snapshot.sevenDayQuota == nil {
+                items.append(DiagnosticItem(
+                    id: desktopCacheMissing ? "claude-desktop-cache-missing" : "claude-quota-missing",
+                    title: language.text(
+                        "尚未捕获 Claude Desktop 本地额度",
+                        "No Claude Desktop quota snapshot yet"
+                    ),
+                    detail: language.text(
+                        "在 Claude Desktop 打开 Settings → Usage。codexU 只读取官方 App 已写入本机的 Usage 缓存，不要求 Claude CLI 登录，也不会请求 Anthropic。",
+                        "Open Settings → Usage in Claude Desktop. codexU only reads the Usage response already cached by the official app; it does not require a Claude CLI login or call Anthropic."
+                    ),
+                    systemName: "internaldrive",
+                    tint: FixedVisualPalette.statusWarning
+                ))
+            } else if usingStatusLine {
+                items.append(DiagnosticItem(
+                    id: "claude-statusline-fallback",
+                    title: language.text("当前使用本地 statusLine 回退", "Using local statusLine fallback"),
+                    detail: language.text(
+                        "Claude Desktop Usage 缓存暂不可用；当前额度来自本地 statusLine 快照。打开 Claude Desktop 的 Settings → Usage 后，Desktop 缓存会重新成为首选数据源。",
+                        "Claude Desktop's Usage cache is unavailable, so quota is coming from the local statusLine snapshot. Opening Settings → Usage in Claude Desktop restores the Desktop cache as the preferred source."
+                    ),
+                    systemName: "arrow.triangle.2.circlepath",
+                    tint: FixedVisualPalette.statusInfo
                 ))
             }
 
             if snapshot.local == nil || snapshot.local?.detailedUsage == nil {
                 items.append(DiagnosticItem(
                     id: "claude-local-usage",
-                    title: language.text("暂无 Claude Code 本机用量记录", "No local Claude Code usage records yet"),
-                    detail: language.text("本机 token 统计来自 ~/.claude/projects 下的 transcript JSONL，只读取 usage 和工具名称等结构化字段。", "Local token stats come from transcript JSONL under ~/.claude/projects and only read structured usage and tool names."),
+                    title: language.text("暂无 Claude 本机 Token 记录", "No local Claude token records yet"),
+                    detail: language.text(
+                        "Token、缓存创建、缓存读取和输出统计来自 ~/.claude/projects 下的 transcript JSONL；额度读取与这些历史统计彼此独立。",
+                        "Token, cache creation, cache read, and output stats come from transcript JSONL under ~/.claude/projects; quota reading is independent from these history records."
+                    ),
                     systemName: "doc.text.magnifyingglass",
                     tint: FixedVisualPalette.statusInfo
                 ))
@@ -4838,7 +5013,7 @@ struct UsageWidgetView: View {
                 items = snapshot.messages.prefix(3).enumerated().map { index, message in
                     DiagnosticItem(
                         id: "claude-message-\(index)",
-                        title: language.text("运行提示", "Runtime note"),
+                        title: language.text("数据源提示", "Data source note"),
                         detail: localizedReaderMessage(message, language: language),
                         systemName: "info.circle.fill",
                         tint: FixedVisualPalette.statusInfo
@@ -7455,14 +7630,14 @@ private struct QuotaResetCompactSummary: View {
 
     private var sevenDayResetValue: String {
         guard let resetsAt = sevenDayQuota?.resetsAt else { return "--" }
-        return resetDateTime(resetsAt, language: language)
+        return resetDateTime(roundedQuotaResetDate(resetsAt), language: language)
     }
 
     private var sevenDayResetHelp: String {
         guard let resetsAt = sevenDayQuota?.resetsAt else {
             return language.text("7d 重置时间暂不可用", "7d reset time is unavailable")
         }
-        let value = resetDateTime(resetsAt, language: language)
+        let value = resetDateTime(roundedQuotaResetDate(resetsAt), language: language)
         return language.text("7d 额度将在 \(value) 重置", "7d quota resets at \(value)")
     }
 
@@ -8092,10 +8267,17 @@ struct UsageTrendPanel: View {
     let trend: UsageTrend?
     let runtimeScope: RuntimeScope
     let language: WidgetLanguage
+    let efficiencySummaries: [QuotaEfficiencyVariantSummary]
     @Binding var window: UsageTrendWindow
+
+    private func variantSummaries(for trend: UsageTrend) -> [ModelVariantUsageSummary] {
+        guard runtimeScope == .codex else { return [] }
+        return ModelVariantUsageSummaryBuilder.build(from: trend, window: window)
+    }
 
     var body: some View {
         if let trend {
+            let variants = variantSummaries(for: trend)
             VStack(alignment: .leading, spacing: usageTrendCardSpacing) {
                 GeometryReader { geometry in
                     HStack(alignment: .top, spacing: usageTrendCardSpacing) {
@@ -8149,9 +8331,22 @@ struct UsageTrendPanel: View {
                         window: $window
                     )
                         .frame(height: usageTrendAreaChartHeight)
+
+                    if !variants.isEmpty {
+                        ModelVariantUsageTableCard(
+                            summaries: variants,
+                            efficiencySummaries: efficiencySummaries,
+                            language: language,
+                            window: window
+                        )
+                        .frame(height: usageTrendVariantTableHeight)
+                    }
                 }
             }
-            .frame(height: usageTrendPanelHeight(showsModelAreaChart: showsModelAttribution(for: trend)))
+            .frame(height: usageTrendPanelHeight(
+                showsModelAreaChart: showsModelAttribution(for: trend),
+                showsVariantTable: !variants.isEmpty
+            ))
         } else {
             AnalyticsEmptyState(
                 systemName: "chart.bar.doc.horizontal",
@@ -8510,6 +8705,180 @@ struct ModelUsageAreaChartCard: View {
             "选择模型面积图的日期范围；数据最多可回溯半年。",
             "Choose the model area chart range; data is available for up to six months."
         )
+    }
+}
+
+private struct ModelVariantUsageTableCard: View {
+    let summaries: [ModelVariantUsageSummary]
+    let efficiencySummaries: [QuotaEfficiencyVariantSummary]
+    let language: WidgetLanguage
+    let window: UsageTrendWindow
+
+    private var efficiencyByID: [String: QuotaEfficiencyVariantSummary] {
+        Dictionary(uniqueKeysWithValues: efficiencySummaries.map { ($0.id, $0) })
+    }
+
+    private var visibleSummaries: [ModelVariantUsageSummary] {
+        Array(summaries.prefix(8))
+    }
+
+    var body: some View {
+        DashboardCard {
+            VStack(alignment: .leading, spacing: dashboardCardContentSpacing) {
+                DashboardCardHeader(
+                    title: language.text("推理档位用量", "Reasoning effort usage"),
+                    systemName: "slider.horizontal.3"
+                ) {
+                    InfoChip(
+                        title: language.text("范围", "Range"),
+                        value: language.text("最近 \(window.dayCount) 天", "Last \(window.dayCount) days")
+                    )
+                }
+
+                tableHeader
+
+                VStack(spacing: 0) {
+                    ForEach(visibleSummaries) { row in
+                        tableRow(row)
+                        if row.id != visibleSummaries.last?.id {
+                            Divider()
+                                .opacity(0.45)
+                        }
+                    }
+                }
+
+                if summaries.count > visibleSummaries.count {
+                    Text(language.text(
+                        "仅展示用量最高的 \(visibleSummaries.count) 个模型 × 推理档位组合。",
+                        "Showing the top \(visibleSummaries.count) model × reasoning-effort combinations."
+                    ))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    private var tableHeader: some View {
+        HStack(spacing: 8) {
+            headerText(language.text("模型 / 档位", "Model / effort"), width: nil, alignment: .leading)
+            headerText(language.text("总 Token", "Total"), width: 82)
+            headerText(language.text("输入", "Input"), width: 82)
+            headerText(language.text("缓存", "Cached"), width: 82)
+            headerText(language.text("命中", "Hit"), width: 62)
+            headerText(language.text("输出", "Output"), width: 76)
+            headerText(language.text("API 等价", "API eq."), width: 76)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func tableRow(_ row: ModelVariantUsageSummary) -> some View {
+        let efficiency = efficiencyByID[row.id]
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                HStack(spacing: 7) {
+                    Text(row.model)
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Text(row.effort.uppercased())
+                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(FixedVisualPalette.surfaceTrack.opacity(0.72))
+                        )
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                valueText(formatTokens(row.usage.tokens.visibleTotalTokens), width: 82)
+                valueText(formatTokens(row.usage.tokens.inputTokens), width: 82)
+                valueText(formatTokens(row.usage.tokens.billableCachedInputTokens), width: 82)
+                valueText(row.cacheHitPercent.map { String(format: "%.1f%%", $0) } ?? "--", width: 62)
+                valueText(formatTokens(row.usage.tokens.outputTokens), width: 76)
+                valueText(
+                    row.usage.estimatedCostUSD > 0 ? formatUSD(row.usage.estimatedCostUSD) : "--",
+                    width: 76
+                )
+            }
+
+            if let efficiency {
+                HStack(spacing: 8) {
+                    Text(language.text(
+                        "历史周效率 · \(resetDateTime(efficiency.latestSampleAt, language: language))",
+                        "Historical weekly efficiency · \(resetDateTime(efficiency.latestSampleAt, language: language))"
+                    ))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(
+                        language.text(
+                            "外推 \(formatTokens(Int64(efficiency.projectedWeeklyTokens.rounded()))) / 周",
+                            "Projected \(formatTokens(Int64(efficiency.projectedWeeklyTokens.rounded()))) / week"
+                        )
+                    )
+                    Text(
+                        language.text(
+                            "\(formatTokens(Int64(efficiency.tokensPerQuotaPercent.rounded()))) / 1% 额度",
+                            "\(formatTokens(Int64(efficiency.tokensPerQuotaPercent.rounded()))) / 1% quota"
+                        )
+                    )
+                    Text(
+                        language.text(
+                            "实测 \(String(format: "%.1f%%", efficiency.measuredQuotaPercent)) · \(efficiency.sampleCount) 段",
+                            "Measured \(String(format: "%.1f%%", efficiency.measuredQuotaPercent)) · \(efficiency.sampleCount) intervals"
+                        )
+                    )
+                    Text(confidenceText(efficiency.confidence))
+                        .fontWeight(.semibold)
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 8, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+                .help(language.text(
+                    "历史采样独立于上方日期范围；本机样本等级只反映样本数量和单一档位占比，无法排除其他设备或云端的额度消耗。",
+                    "Historical samples are independent of the selected date range. Local sample quality reflects sample count and effort dominance; usage on other devices or in the cloud is not measured."
+                ))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, efficiency == nil ? 7 : 5)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func confidenceText(_ confidence: QuotaEfficiencyConfidence) -> String {
+        switch confidence {
+        case .high:
+            return language.text("本机样本高", "High local sample")
+        case .medium:
+            return language.text("本机样本中", "Medium local sample")
+        case .early:
+            return language.text("早期样本", "Early sample")
+        }
+    }
+
+    private func headerText(
+        _ text: String,
+        width: CGFloat?,
+        alignment: Alignment = .trailing
+    ) -> some View {
+        Text(text)
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .frame(maxWidth: width == nil ? .infinity : nil, alignment: alignment)
+            .frame(width: width, alignment: alignment)
+    }
+
+    private func valueText(_ text: String, width: CGFloat) -> some View {
+        Text(text)
+            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+            .monospacedDigit()
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .frame(width: width, alignment: .trailing)
     }
 }
 
@@ -9392,6 +9761,7 @@ enum ProjectTimeframe: String, CaseIterable, Identifiable {
 
 struct ProjectBoardPanel: View {
     let projectBoard: ProjectBoard?
+    let runtimeScope: RuntimeScope
     let language: WidgetLanguage
     @State private var timeframe: ProjectTimeframe = .recent
 
@@ -9426,7 +9796,10 @@ struct ProjectBoardPanel: View {
                         AnalyticsEmptyState(
                             systemName: "folder.badge.questionmark",
                             title: language.text("暂无项目记录", "No project records"),
-                            detail: language.text("没有可归类的本机 Codex 项目用量。", "No local Codex project usage can be grouped yet.")
+                            detail: language.text(
+                                "没有可归类的本机 \(runtimeScope.displayName) 项目用量。",
+                                "No local \(runtimeScope.displayName) project usage can be grouped yet."
+                            )
                         )
                         .frame(minHeight: 214)
                     } else {
@@ -9436,7 +9809,7 @@ struct ProjectBoardPanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            ProjectActivityOverview(projectBoard: projectBoard, language: language)
+            ProjectActivityOverview(projectBoard: projectBoard, runtimeScope: runtimeScope, language: language)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
@@ -9444,6 +9817,7 @@ struct ProjectBoardPanel: View {
 
 struct ProjectActivityOverview: View {
     let projectBoard: ProjectBoard?
+    let runtimeScope: RuntimeScope
     let language: WidgetLanguage
     @Environment(\.visualTokens) private var visualTokens
 
@@ -9451,20 +9825,8 @@ struct ProjectActivityOverview: View {
         projectBoard?.recentProjects ?? []
     }
 
-    private var allProjects: [ProjectUsage] {
-        projectBoard?.allProjects ?? []
-    }
-
     private var recentTokenTotal: Int64 {
         recentProjects.reduce(0) { $0 + $1.tokens }
-    }
-
-    private var newProjectCount: Int {
-        let allById = Dictionary(uniqueKeysWithValues: allProjects.map { ($0.id, $0) })
-        return recentProjects.filter { recent in
-            guard let all = allById[recent.id] else { return false }
-            return all.threadCount <= recent.threadCount
-        }.count
     }
 
     private var topOneShare: String {
@@ -9496,7 +9858,10 @@ struct ProjectActivityOverview: View {
                 ) {
                     InfoChip(title: language.text("近 7 天", "7 days"), value: "\(recentProjects.count)")
                         .frame(height: dashboardHeaderControlHeight)
-                        .help(language.text("基于近 7 天本机 Codex 项目活动统计。", "Based on local Codex project activity in the last 7 days."))
+                        .help(language.text(
+                            "基于近 7 天本机 \(runtimeScope.displayName) 项目活动统计。",
+                            "Based on local \(runtimeScope.displayName) project activity in the last 7 days."
+                        ))
                 }
 
                 if recentProjects.isEmpty {
@@ -9515,9 +9880,9 @@ struct ProjectActivityOverview: View {
                                 tint: visualTokens.data.series[1].color
                             )
                             MetricTile(
-                                title: language.text("新增估算", "New est."),
-                                value: "\(newProjectCount)",
-                                tint: FixedVisualPalette.statusSuccess
+                                title: language.text("近 7 天 Token", "7-day tokens"),
+                                value: formatTokens(recentTokenTotal),
+                                tint: visualTokens.data.series[0].color
                             )
                         }
                         HStack(spacing: dashboardListRowSpacing) {
@@ -10593,6 +10958,7 @@ private let settingsShortcutActionWidth: CGFloat = settingsAccessoryColumnWidth
 private let usageTrendCardHeight: CGFloat = 214
 private let usageTrendCardSpacing: CGFloat = dashboardGridSpacing
 private let usageTrendAreaChartHeight: CGFloat = 344
+private let usageTrendVariantTableHeight: CGFloat = 286
 private let usageTrendAreaPlotHeight: CGFloat = 210
 private let usageTrendAreaAxisHeight: CGFloat = 16
 private let usageTrendLegendHeight: CGFloat = 18
@@ -10698,9 +11064,13 @@ private func usageTrendSevenDayCardWidth(containerWidth: CGFloat, weekCount: Int
     )
 }
 
-private func usageTrendPanelHeight(showsModelAreaChart: Bool) -> CGFloat {
+private func usageTrendPanelHeight(
+    showsModelAreaChart: Bool,
+    showsVariantTable: Bool = false
+) -> CGFloat {
     usageTrendCardHeight
         + (showsModelAreaChart ? usageTrendCardSpacing + usageTrendAreaChartHeight : 0)
+        + (showsVariantTable ? usageTrendCardSpacing + usageTrendVariantTableHeight : 0)
 }
 
 private func localizedDashboardTitle(_ tab: DashboardTab, language: WidgetLanguage) -> String {
@@ -11228,6 +11598,10 @@ private func timeOnly(_ date: Date, language: WidgetLanguage = .zh) -> String {
     formatter.locale = Locale(identifier: language.isChinese ? "zh_CN" : "en_US_POSIX")
     formatter.dateFormat = "HH:mm"
     return formatter.string(from: date)
+}
+
+private func roundedQuotaResetDate(_ date: Date) -> Date {
+    Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
 }
 
 private func resetDateTime(_ date: Date, language: WidgetLanguage = .zh) -> String {
@@ -12233,7 +12607,9 @@ struct codexUMain {
         }
 
         if CommandLine.arguments.contains("--self-test-rate-limits") {
-            exit(CodexRateLimitNormalizerSelfTest.run() ? 0 : 1)
+            let resetMinuteRounding = roundedQuotaResetDate(Date(timeIntervalSince1970: 119))
+                == Date(timeIntervalSince1970: 120)
+            exit(CodexRateLimitNormalizerSelfTest.run() && resetMinuteRounding ? 0 : 1)
         }
 
         if CommandLine.arguments.contains("--self-test-updates") {
@@ -12241,7 +12617,7 @@ struct codexUMain {
         }
 
         if CommandLine.arguments.contains("--self-test-statistics-time-zone") {
-            exit(StatisticsTimeZoneSelfTest.run() ? 0 : 1)
+            exit(StatisticsTimeZoneSelfTest.run() && CodexUsageReader.selfTestUsageTrendTimeZone() ? 0 : 1)
         }
 
         if CommandLine.arguments.contains("--self-test-token-counter") {
@@ -12255,6 +12631,11 @@ struct codexUMain {
         if CommandLine.arguments.contains("--self-test-model-usage-trend") {
             exit(ModelUsageTrendSelfTest.run() ? 0 : 1)
         }
+
+        if CommandLine.arguments.contains("--self-test-quota-efficiency") {
+            exit(QuotaEfficiencyHistoryStore.selfTest() ? 0 : 1)
+        }
+
 
         if CommandLine.arguments.contains("--self-test-model-inference-performance") {
             exit(ModelInferencePerformanceSelfTest.run() ? 0 : 1)
@@ -12270,6 +12651,19 @@ struct codexUMain {
 
         if CommandLine.arguments.contains("--self-test-leadership-model") {
             exit(LeadershipModelSelfTest.run() ? 0 : 1)
+        }
+
+        if CommandLine.arguments.contains("--diagnose-claude-desktop") {
+            print(ClaudeDesktopUsageCacheReader.diagnosticJSON())
+            return
+        }
+
+        if CommandLine.arguments.contains("--self-test-claude-desktop-cache") {
+            exit(ClaudeDesktopUsageCacheReader.selfTest() ? 0 : 1)
+        }
+
+        if CommandLine.arguments.contains("--self-test-claude-recent-projects") {
+            exit(ClaudeCodeRuntimeProvider.selfTestRecentProjects() ? 0 : 1)
         }
 
         if CommandLine.arguments.contains("--self-test-claude-skill-paths") {

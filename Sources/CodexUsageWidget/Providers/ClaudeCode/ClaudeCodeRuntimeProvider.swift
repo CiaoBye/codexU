@@ -3,28 +3,96 @@ import Foundation
 struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
     let scope: RuntimeScope = .claudeCode
 
+    static func selfTestRecentProjects() -> Bool {
+        ClaudeCodeTranscriptReader.selfTestRecentProjects()
+    }
+
     func loadSnapshot(context: RuntimeLoadContext) -> RuntimeUsageSnapshot {
         var messages: [String] = []
         let transcriptLocal = ClaudeCodeTranscriptReader().loadLocalUsage(context: context, messages: &messages)
-        let statsFallback = ClaudeCodeStatsCacheReader().loadFallbackLocalUsage(context: context, messages: &messages)
+        let statsFallback = transcriptLocal == nil
+            ? ClaudeCodeStatsCacheReader().loadFallbackLocalUsage(context: context, messages: &messages)
+            : nil
         let globalSkills = ClaudeCodeGlobalStateReader().loadSkillUsages(context: context, messages: &messages)
-        let statusLine = ClaudeCodeStatusLineSnapshotReader().load(context: context, messages: &messages)
+        let desktop = ClaudeDesktopUsageCacheReader().load(context: context, messages: &messages)
         let taskBoard = ClaudeCodeTaskReader().loadTaskBoard(context: context, messages: &messages)
         let local = mergeClaudeLocalUsage(transcriptLocal ?? statsFallback, globalSkills: globalSkills)
+        let usageSourceLabel: String
+        if transcriptLocal != nil {
+            usageSourceLabel = "Claude Code local transcripts"
+        } else if statsFallback != nil {
+            usageSourceLabel = "Claude Code stats-cache · local fallback"
+        } else {
+            usageSourceLabel = "Claude Code local usage unavailable"
+        }
 
         if local == nil {
             messages.append("暂无 Claude Code 本机用量记录")
         }
 
-        let status = makeStatus(local: local, statusLine: statusLine)
+        var primary = desktop.primary
+        var secondary = desktop.secondary
+        var quotaExists = desktop.exists
+        var quotaIsStale = desktop.isStale
+        var quotaSourceLabel: String
+        var planType = "Claude Desktop"
+
+        if desktop.hasQuota && !desktop.isStale {
+            quotaSourceLabel = "Claude Desktop 本地缓存 · 只读"
+        } else {
+            // statusLine is a strictly local fallback. It is only inspected when
+            // Desktop has no fresh quota reading, so Desktop-only users never
+            // need to run or log in to a separate Claude CLI.
+            let statusLine = ClaudeCodeStatusLineSnapshotReader().load(
+                context: context,
+                messages: &messages
+            )
+
+            if statusLine.hasQuota && !statusLine.isStale {
+                primary = statusLine.primary
+                secondary = statusLine.secondary
+                quotaExists = statusLine.exists
+                quotaIsStale = false
+                quotaSourceLabel = "Claude statusLine · 本地快照"
+                planType = "Claude Code"
+            } else if desktop.hasQuota {
+                // A dated Desktop cache is still more truthful than inventing a
+                // percentage. Keep the last official reading and mark it stale.
+                quotaSourceLabel = "Claude Desktop 本地缓存 · 已过期"
+            } else if statusLine.hasQuota {
+                primary = statusLine.primary
+                secondary = statusLine.secondary
+                quotaExists = statusLine.exists
+                quotaIsStale = statusLine.isStale
+                quotaSourceLabel = statusLine.isStale
+                    ? "Claude statusLine · 已过期"
+                    : "Claude statusLine · 本地快照"
+                planType = "Claude Code"
+            } else {
+                primary = nil
+                secondary = nil
+                quotaExists = desktop.exists || statusLine.exists
+                quotaIsStale = desktop.isStale || statusLine.isStale
+                quotaSourceLabel = "Claude 本地记录 · 暂无额度快照"
+            }
+        }
+
+        let hasQuota = primary != nil || secondary != nil
+        let status = makeStatus(
+            local: local,
+            hasQuota: hasQuota,
+            isStale: quotaIsStale,
+            sourceExists: quotaExists
+        )
+
         let snapshot = UsageSnapshot(
             refreshedAt: context.now,
-            account: AccountInfo(type: "local", planType: "Claude Code", emailPresent: false),
+            account: AccountInfo(type: "local", planType: planType, emailPresent: false),
             limitId: scope.runtimeId,
-            limitName: "Claude Code local",
-            quotaReadSucceeded: statusLine.hasQuota,
-            fiveHourQuota: statusLine.primary,
-            sevenDayQuota: statusLine.secondary,
+            limitName: "Claude local",
+            quotaReadSucceeded: hasQuota,
+            fiveHourQuota: primary,
+            sevenDayQuota: secondary,
             monthlyQuota: nil,
             credits: nil,
             cloudLifetimeTokens: nil,
@@ -37,8 +105,8 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
             scope: scope,
             snapshot: snapshot,
             status: status,
-            quotaSourceLabel: statusLine.hasQuota ? "Claude statusLine + local records" : "Local records; quota needs statusLine",
-            usageSourceLabel: "Claude Code local transcripts"
+            quotaSourceLabel: quotaSourceLabel,
+            usageSourceLabel: usageSourceLabel
         )
     }
 
@@ -47,17 +115,22 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
         return ClaudeCodeTaskReader().loadTaskBoard(context: context, messages: &messages)
     }
 
-    private func makeStatus(local: LocalUsage?, statusLine: ClaudeStatusLineSnapshot) -> RuntimeMenuStatus {
-        if statusLine.isStale {
+    private func makeStatus(
+        local: LocalUsage?,
+        hasQuota: Bool,
+        isStale: Bool,
+        sourceExists: Bool
+    ) -> RuntimeMenuStatus {
+        if isStale, hasQuota {
             return .stale
         }
-        if statusLine.hasQuota {
+        if hasQuota {
             return .available
         }
         if local != nil {
-            return statusLine.exists ? .localOnly : .snapshotNeeded
+            return sourceExists ? .localOnly : .snapshotNeeded
         }
-        return statusLine.exists ? .localOnly : .unavailable
+        return sourceExists ? .localOnly : .unavailable
     }
 }
 
@@ -268,7 +341,10 @@ private final class ClaudeCodeTranscriptReader {
 
         return TokenBreakdown(
             inputTokens: input + cacheCreation + cacheRead,
-            cachedInputTokens: cacheCreation + cacheRead,
+            // Claude reports cache creation and cache reads separately. Preserve
+            // that distinction so pricing does not charge writes at the read rate.
+            cachedInputTokens: cacheRead,
+            cacheWriteInputTokens: cacheCreation,
             outputTokens: output,
             reasoningOutputTokens: reasoning,
             totalTokens: total
@@ -314,6 +390,7 @@ private final class ClaudeCodeTranscriptReader {
         var lifetime = PricedTokenUsage.zero
         var dailyUsage: [String: (date: Date, usage: PricedTokenUsage)] = [:]
         var projects: [String: ClaudeProjectAccumulator] = [:]
+        var recentProjects: [String: ClaudeProjectAccumulator] = [:]
 
         for delta in uniqueDeltas {
             let cost = claudeEstimatedCostUSD(tokens: delta.tokens, model: delta.model)
@@ -341,6 +418,11 @@ private final class ClaudeCodeTranscriptReader {
             var project = projects[projectPath] ?? ClaudeProjectAccumulator(path: projectPath)
             project.add(delta: delta, costUSD: cost)
             projects[projectPath] = project
+            if delta.date >= sevenDayStart {
+                var recentProject = recentProjects[projectPath] ?? ClaudeProjectAccumulator(path: projectPath)
+                recentProject.add(delta: delta, costUSD: cost)
+                recentProjects[projectPath] = recentProject
+            }
         }
 
         let detailed = DetailedUsage(
@@ -360,14 +442,16 @@ private final class ClaudeCodeTranscriptReader {
             now: now,
             calendar: calendar
         )
-        let projectUsages = projects.values
-            .map { $0.makeProject() }
-            .sorted {
+        func sortedProjectUsages(_ accumulators: [String: ClaudeProjectAccumulator]) -> [ProjectUsage] {
+            accumulators.values.map { $0.makeProject() }.sorted {
                 if $0.tokens == $1.tokens {
                     return ($0.lastActiveAt ?? .distantPast) > ($1.lastActiveAt ?? .distantPast)
                 }
                 return $0.tokens > $1.tokens
             }
+        }
+        let projectUsages = sortedProjectUsages(projects)
+        let recentProjectUsages = sortedProjectUsages(recentProjects)
         let recentThreads = makeRecentThreads(from: summaries)
         let toolUsages = makeToolUsages(from: summaries, lifetime: lifetime)
         let skillUsages = makeSkillUsages(from: summaries, context: context)
@@ -388,10 +472,62 @@ private final class ClaudeCodeTranscriptReader {
             detailedUsage: detailed,
             usageTrend: usageTrend,
             inferencePerformance: nil,
-            projectBoard: ProjectBoard(recentProjects: Array(projectUsages.prefix(8)), allProjects: projectUsages),
+            projectBoard: ProjectBoard(recentProjects: recentProjectUsages, allProjects: projectUsages),
             toolUsages: toolUsages,
             skillUsages: skillUsages
         )
+    }
+
+    static func selfTestRecentProjects() -> Bool {
+        let now = Date(timeIntervalSince1970: 1_790_424_000)
+        let context = RuntimeLoadContext(
+            now: now,
+            homeDirectory: URL(fileURLWithPath: "/private/tmp/codexu-test-home", isDirectory: true),
+            cacheDirectory: URL(fileURLWithPath: "/private/tmp/codexu-test-cache", isDirectory: true),
+            statistics: StatisticsContext(
+                preference: StatisticsTimeZonePreference(selection: .utc, fixedIdentifier: "UTC"),
+                now: now
+            )
+        )
+        let summaries: [ClaudeTranscriptSummary] = (0..<9).map { index in
+            let isRecent = index == 8
+            let path = isRecent ? "/projects/recent" : "/projects/old-\(index)"
+            let date = isRecent ? now : now.addingTimeInterval(-20 * 24 * 3_600)
+            let tokens: Int64 = isRecent ? 100 : 1_000
+            return ClaudeTranscriptSummary(
+                filePath: "/private/tmp/codexu-test-\(index).jsonl",
+                sessionId: "test-\(index)",
+                projectPath: path,
+                model: nil,
+                lastActiveAt: date,
+                deltas: [ClaudeUsageDelta(
+                    messageId: "test-\(index)",
+                    date: date,
+                    tokens: TokenBreakdown(
+                        inputTokens: tokens,
+                        cachedInputTokens: 0,
+                        outputTokens: 0,
+                        reasoningOutputTokens: 0,
+                        totalTokens: tokens
+                    ),
+                    model: nil,
+                    projectPath: path,
+                    sessionId: "test-\(index)"
+                )],
+                toolCalls: [:],
+                skillLoads: []
+            )
+        }
+        var messages: [String] = []
+        let board = ClaudeCodeTranscriptReader()
+            .makeLocalUsage(from: summaries, context: context, messages: &messages)?
+            .projectBoard
+        let valid = board?.allProjects.count == 9
+            && board?.recentProjects.count == 1
+            && board?.recentProjects.first?.id == "/projects/recent"
+            && board?.recentProjects.first?.tokens == 100
+        if !valid { print("Claude recent-project self-test failed") }
+        return valid
     }
 
     private func makeSevenDayBuckets(
@@ -757,7 +893,10 @@ private final class ClaudeCodeStatusLineSnapshotReader {
         }
 
         let capturedAt = claudeDateValue(object["capturedAt"]) ?? claudeDateValue(object["captured_at"])
-        let isStale = capturedAt.map { context.now.timeIntervalSince($0) > 900 } ?? false
+        let isStale = capturedAt.map {
+            let age = context.now.timeIntervalSince($0)
+            return age > 900 || age < -900
+        } ?? true
         if isStale {
             messages.append("Claude Code 快照已过期，打开 Claude Code 后刷新")
         }
@@ -977,7 +1116,20 @@ private struct ClaudeSkillLoad: Codable {
 private struct ClaudeModelPrice {
     let inputPerMillion: Double
     let cachedInputPerMillion: Double
+    let cacheWriteInputPerMillion: Double
     let outputPerMillion: Double
+
+    init(
+        inputPerMillion: Double,
+        cachedInputPerMillion: Double,
+        outputPerMillion: Double,
+        cacheWriteInputPerMillion: Double? = nil
+    ) {
+        self.inputPerMillion = inputPerMillion
+        self.cachedInputPerMillion = cachedInputPerMillion
+        self.cacheWriteInputPerMillion = cacheWriteInputPerMillion ?? inputPerMillion
+        self.outputPerMillion = outputPerMillion
+    }
 }
 
 private struct ClaudeProjectAccumulator {
@@ -1143,24 +1295,76 @@ private func claudeModelPrice(for model: String?) -> ClaudeModelPrice? {
     let normalized = (model ?? "").lowercased()
     guard !normalized.isEmpty else { return nil }
 
+    // Current Claude 5 family. Cache write is the standard 5-minute write rate;
+    // local transcripts do not expose TTL, so 1-hour writes remain an estimate.
+    if normalized.contains("claude-opus-5-5") || normalized.contains("opus-5-5") {
+        return ClaudeModelPrice(
+            inputPerMillion: 4,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 20,
+            cacheWriteInputPerMillion: 5
+        )
+    }
+    if normalized.contains("claude-opus-5") || normalized.contains("opus-5") {
+        return ClaudeModelPrice(
+            inputPerMillion: 5,
+            cachedInputPerMillion: 0.5,
+            outputPerMillion: 25,
+            cacheWriteInputPerMillion: 6.25
+        )
+    }
+    if normalized.contains("claude-fable-5-1") || normalized.contains("fable-5-1") {
+        return ClaudeModelPrice(
+            inputPerMillion: 10,
+            cachedInputPerMillion: 0.25,
+            outputPerMillion: 50,
+            cacheWriteInputPerMillion: 12.5
+        )
+    }
+    if normalized.contains("claude-sonnet-5") || normalized.contains("sonnet-5") {
+        return ClaudeModelPrice(
+            inputPerMillion: 2,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 10,
+            cacheWriteInputPerMillion: 2.5
+        )
+    }
+
+    // Legacy fallbacks retained for older local transcripts.
     if normalized.contains("opus") {
-        return ClaudeModelPrice(inputPerMillion: 15, cachedInputPerMillion: 1.5, outputPerMillion: 75)
+        return ClaudeModelPrice(
+            inputPerMillion: 15,
+            cachedInputPerMillion: 1.5,
+            outputPerMillion: 75,
+            cacheWriteInputPerMillion: 18.75
+        )
     }
     if normalized.contains("sonnet") {
-        return ClaudeModelPrice(inputPerMillion: 3, cachedInputPerMillion: 0.3, outputPerMillion: 15)
+        return ClaudeModelPrice(
+            inputPerMillion: 3,
+            cachedInputPerMillion: 0.3,
+            outputPerMillion: 15,
+            cacheWriteInputPerMillion: 3.75
+        )
     }
     if normalized.contains("haiku") {
-        return ClaudeModelPrice(inputPerMillion: 0.8, cachedInputPerMillion: 0.08, outputPerMillion: 4)
+        return ClaudeModelPrice(
+            inputPerMillion: 0.8,
+            cachedInputPerMillion: 0.08,
+            outputPerMillion: 4,
+            cacheWriteInputPerMillion: 1
+        )
     }
     return nil
 }
 
 private func claudeEstimatedCostUSD(tokens: TokenBreakdown, model: String?) -> Double {
     guard let price = claudeModelPrice(for: model) else { return 0 }
-    let uncachedInputCost = Double(tokens.uncachedInputTokens) / 1_000_000 * price.inputPerMillion
+    let uncachedInputCost = Double(tokens.ordinaryUncachedInputTokens) / 1_000_000 * price.inputPerMillion
     let cachedInputCost = Double(tokens.billableCachedInputTokens) / 1_000_000 * price.cachedInputPerMillion
+    let cacheWriteCost = Double(tokens.billableCacheWriteInputTokens) / 1_000_000 * price.cacheWriteInputPerMillion
     let outputCost = Double(max(tokens.outputTokens, 0)) / 1_000_000 * price.outputPerMillion
-    return uncachedInputCost + cachedInputCost + outputCost
+    return uncachedInputCost + cachedInputCost + cacheWriteCost + outputCost
 }
 
 private func claudeDayKey(_ date: Date, calendar: Calendar = .current) -> String {
