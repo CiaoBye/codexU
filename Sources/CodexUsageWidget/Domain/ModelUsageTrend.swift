@@ -481,6 +481,23 @@ enum ModelUsageTrendSelfTest {
         expect(unsupportedTrend.modelTrends == nil, "unsupported providers should not use an empty model list")
         expect(ModelUsageAreaSeriesBuilder.build(from: unsupportedTrend).isEmpty, "unsupported providers should not emit model series")
 
+        let highID = modelUsageIdentifier(for: "gpt-6-sol", reasoningEffort: "High")
+        let xhighID = modelUsageIdentifier(for: "gpt-6-sol", reasoningEffort: "xhigh")
+        let maxID = modelUsageIdentifier(for: "gpt-6-sol", reasoningEffort: " MAX ")
+        expect(highID == "gpt-6-sol::effort=high", "reasoning effort should normalize to a stable lower-case key")
+        expect(xhighID == "gpt-6-sol::effort=xhigh", "xhigh should have its own model usage key")
+        expect(maxID == "gpt-6-sol::effort=max", "max should have its own model usage key")
+        expect(highID != xhighID && xhighID != maxID && highID != maxID,
+               "reasoning effort must produce a distinct model usage key")
+        expect(
+            modelUsageDisplayName(model: "gpt-6-sol", reasoningEffort: "xhigh") == "gpt-6-sol · xhigh",
+            "reasoning effort should be visible in the model series label"
+        )
+        expect(
+            modelUsageIdentifier(for: "gpt-6-sol", reasoningEffort: nil) == "gpt-6-sol",
+            "missing effort should preserve the legacy model-only key"
+        )
+
         expect(resolvedModelUsageName(turnContextModel: "gpt-turn", threadModel: "gpt-thread") == "gpt-turn", "turn context model should win")
         expect(resolvedModelUsageName(turnContextModel: "", threadModel: "gpt-thread") == "gpt-thread", "empty turn context should fall back to thread model")
         expect(resolvedModelUsageName(turnContextModel: nil, threadModel: nil) == nil, "missing models should remain unrecorded")
