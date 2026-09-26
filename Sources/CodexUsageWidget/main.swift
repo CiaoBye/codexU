@@ -7630,14 +7630,14 @@ private struct QuotaResetCompactSummary: View {
 
     private var sevenDayResetValue: String {
         guard let resetsAt = sevenDayQuota?.resetsAt else { return "--" }
-        return resetDateTime(resetsAt, language: language)
+        return resetDateTime(roundedQuotaResetDate(resetsAt), language: language)
     }
 
     private var sevenDayResetHelp: String {
         guard let resetsAt = sevenDayQuota?.resetsAt else {
             return language.text("7d 重置时间暂不可用", "7d reset time is unavailable")
         }
-        let value = resetDateTime(resetsAt, language: language)
+        let value = resetDateTime(roundedQuotaResetDate(resetsAt), language: language)
         return language.text("7d 额度将在 \(value) 重置", "7d quota resets at \(value)")
     }
 
@@ -11600,6 +11600,10 @@ private func timeOnly(_ date: Date, language: WidgetLanguage = .zh) -> String {
     return formatter.string(from: date)
 }
 
+private func roundedQuotaResetDate(_ date: Date) -> Date {
+    Date(timeIntervalSince1970: (date.timeIntervalSince1970 / 60).rounded() * 60)
+}
+
 private func resetDateTime(_ date: Date, language: WidgetLanguage = .zh) -> String {
     if Calendar.current.isDateInToday(date) {
         return timeOnly(date, language: language)
@@ -12603,7 +12607,9 @@ struct codexUMain {
         }
 
         if CommandLine.arguments.contains("--self-test-rate-limits") {
-            exit(CodexRateLimitNormalizerSelfTest.run() ? 0 : 1)
+            let resetMinuteRounding = roundedQuotaResetDate(Date(timeIntervalSince1970: 119))
+                == Date(timeIntervalSince1970: 120)
+            exit(CodexRateLimitNormalizerSelfTest.run() && resetMinuteRounding ? 0 : 1)
         }
 
         if CommandLine.arguments.contains("--self-test-updates") {
