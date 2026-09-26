@@ -3365,7 +3365,7 @@ final class CodexUsageReader {
             return nil
         }
         return caches
-            .appendingPathComponent("codexU", isDirectory: true)
+            .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
             .appendingPathComponent("local-analytics-v2.json")
     }
 
@@ -3374,7 +3374,7 @@ final class CodexUsageReader {
             return nil
         }
         return caches
-            .appendingPathComponent("codexU", isDirectory: true)
+            .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
             .appendingPathComponent("session-usage-v1.json")
     }
 

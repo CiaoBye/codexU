@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 新增可与官方版并存的 `codexU Next` 开发构建：独立 Bundle ID、App 名称、UserDefaults、Cache 和推理历史目录，避免测试 v1.4.0 时覆盖正式版或污染其本机缓存；提供 `make dev-build` / `dev-install` / `dev-dmg-arm64`。
 - Claude 额度读取改为 **Claude Desktop 本地 HTTP 缓存优先**：直接读取官方 Desktop 已落盘的 Usage 响应，全程只读，不请求 Anthropic、不读取 OAuth/Keychain、不自动运行 `claude`；本地缓存无有效数据时才回退现有 statusLine 快照。
 - 新增 Claude Desktop Chromium Simple Cache + Zstandard 解码支持，并加入 30 分钟新鲜度判定、多账号最近记录选择、缓存路径探测和独立自测；缓存过期时保留最后官方读数并明确标记为陈旧数据。
 - Claude transcript 费用统计保留 cache creation / cache read 语义，更新 Claude Opus 5.5 等当前模型价格。
