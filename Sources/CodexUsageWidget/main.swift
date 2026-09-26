@@ -12535,6 +12535,11 @@ struct codexUMain {
             exit(LeadershipModelSelfTest.run() ? 0 : 1)
         }
 
+        if CommandLine.arguments.contains("--diagnose-claude-desktop") {
+            print(ClaudeDesktopUsageCacheReader.diagnosticJSON())
+            return
+        }
+
         if CommandLine.arguments.contains("--self-test-claude-desktop-cache") {
             exit(ClaudeDesktopUsageCacheReader.selfTest() ? 0 : 1)
         }
