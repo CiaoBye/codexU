@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Claude 额度读取改为 **Claude Desktop 本地 HTTP 缓存优先**：直接读取官方 Desktop 已落盘的 Usage 响应，全程只读，不请求 Anthropic、不读取 OAuth/Keychain、不自动运行 `claude`；本地缓存无有效数据时才回退现有 statusLine 快照。
+- 新增 Claude Desktop Chromium Simple Cache + Zstandard 解码支持，并加入 30 分钟新鲜度判定、多账号最近记录选择、缓存路径探测和独立自测；缓存过期时保留最后官方读数并明确标记为陈旧数据。
+- Claude transcript 费用统计保留 cache creation / cache read 语义，更新 Claude Opus 5.5 等当前模型价格。
+- Codex 补齐 GPT-6 Astra / GPT-6 Sol / GPT-6 Luna 当前标准价格、缓存价格、Fast 与 >272K 长上下文估算。
+- Codex 用量趋势升级为 **模型 × reasoning effort** 归因，High / xhigh / Max 不再全部并入同一个模型曲线，便于直接比较各推理档位的 Token、缓存与 API 等效成本。
+- 新增 `THIRD_PARTY_NOTICES.md`，记录 Zstandard BSD-3-Clause 与 Codenotch MIT 本地缓存实现参考来源。
+
+
 ## 1.3.1 - 2026-09-01
 
 - 完成独立 Windows x86_64 Tauri Dashboard V0：Overview、Tasks、AI Leadership、Usage、Inference、Projects、Skills 和 Settings 八个 Web surface 统一接入本地数据管线。
