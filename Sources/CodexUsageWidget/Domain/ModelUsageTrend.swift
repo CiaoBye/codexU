@@ -81,6 +81,86 @@ struct ModelUsageAreaSeries: Identifiable, Equatable, Codable {
     let usesReferencePricing: Bool
 }
 
+struct ModelVariantUsageSummary: Identifiable, Equatable {
+    let id: String
+    let model: String
+    let effort: String
+    let usage: PricedTokenUsage
+    let activeDayCount: Int
+
+    var cacheHitPercent: Double? {
+        let input = usage.tokens.inputTokens
+        guard input > 0 else { return nil }
+        return Double(usage.tokens.billableCachedInputTokens) / Double(input) * 100
+    }
+
+    var outputSharePercent: Double? {
+        let total = usage.tokens.visibleTotalTokens
+        guard total > 0 else { return nil }
+        return Double(max(usage.tokens.outputTokens, 0)) / Double(total) * 100
+    }
+}
+
+enum ModelVariantUsageSummaryBuilder {
+    static func build(from trend: UsageTrend, window: UsageTrendWindow) -> [ModelVariantUsageSummary] {
+        let visibleBuckets = ModelUsageAreaSeriesBuilder.dateBuckets(from: trend, window: window)
+        let visibleIDs = Set(visibleBuckets.map(\.id))
+
+        return (trend.modelTrends ?? []).compactMap { modelTrend in
+            guard let parsed = parseVariantID(modelTrend.id) else { return nil }
+
+            var usage = PricedTokenUsage.zero
+            var activeDayCount = 0
+            for bucket in modelTrend.dayBuckets where visibleIDs.contains(bucket.id) {
+                usage.add(
+                    tokens: bucket.usage.tokens,
+                    costUSD: bucket.usage.estimatedCostUSD,
+                    usesReferencePricing: bucket.usage.usesReferencePricing
+                )
+                if bucket.tokens > 0 {
+                    activeDayCount += 1
+                }
+            }
+            guard usage.tokens.visibleTotalTokens > 0 else { return nil }
+
+            return ModelVariantUsageSummary(
+                id: modelTrend.id,
+                model: parsed.model,
+                effort: parsed.effort,
+                usage: usage,
+                activeDayCount: activeDayCount
+            )
+        }
+        .sorted { lhs, rhs in
+            let left = lhs.usage.tokens.visibleTotalTokens
+            let right = rhs.usage.tokens.visibleTotalTokens
+            if left != right { return left > right }
+            if lhs.model != rhs.model { return lhs.model < rhs.model }
+            return effortRank(lhs.effort) > effortRank(rhs.effort)
+        }
+    }
+
+    static func parseVariantID(_ id: String) -> (model: String, effort: String)? {
+        let separator = "::effort="
+        guard let range = id.range(of: separator) else { return nil }
+        let model = String(id[..<range.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let effort = String(id[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty, !effort.isEmpty else { return nil }
+        return (model, effort)
+    }
+
+    private static func effortRank(_ effort: String) -> Int {
+        switch effort.lowercased() {
+        case "max": return 5
+        case "xhigh": return 4
+        case "high": return 3
+        case "medium": return 2
+        case "low": return 1
+        default: return 0
+        }
+    }
+}
+
 enum ModelUsageAreaSeriesBuilder {
     static let visibleModelLimit = 8
     static let otherModelID = "other-models"
@@ -480,6 +560,74 @@ enum ModelUsageTrendSelfTest {
         )
         expect(unsupportedTrend.modelTrends == nil, "unsupported providers should not use an empty model list")
         expect(ModelUsageAreaSeriesBuilder.build(from: unsupportedTrend).isEmpty, "unsupported providers should not emit model series")
+
+        let variantDay = UsageDayBucket(
+            id: dateBuckets[30].id,
+            date: dateBuckets[30].date,
+            usage: PricedTokenUsage(
+                tokens: TokenBreakdown(
+                    inputTokens: 1_000,
+                    cachedInputTokens: 900,
+                    outputTokens: 100,
+                    reasoningOutputTokens: 0,
+                    totalTokens: 1_100
+                ),
+                estimatedCostUSD: 0.25
+            ),
+            sourceQuality: .detailed
+        )
+        let variantTrend = UsageTrend(
+            dayBuckets: dateBuckets,
+            heatmapWeeks: [],
+            heatmapThresholds: [],
+            summary: summary(for: dateBuckets),
+            modelTrends: [
+                ModelUsageTrend(
+                    id: "gpt-6-sol::effort=high",
+                    model: "gpt-6-sol · high",
+                    dayBuckets: [variantDay],
+                    summary: summary(for: [variantDay]),
+                    activeDayCount: 1
+                ),
+                ModelUsageTrend(
+                    id: "gpt-6-sol::effort=max",
+                    model: "gpt-6-sol · max",
+                    dayBuckets: [UsageDayBucket(
+                        id: variantDay.id,
+                        date: variantDay.date,
+                        usage: PricedTokenUsage(
+                            tokens: TokenBreakdown(
+                                inputTokens: 2_000,
+                                cachedInputTokens: 1_800,
+                                outputTokens: 200,
+                                reasoningOutputTokens: 0,
+                                totalTokens: 2_200
+                            ),
+                            estimatedCostUSD: 0.5
+                        ),
+                        sourceQuality: .detailed
+                    )],
+                    summary: summary(for: [variantDay]),
+                    activeDayCount: 1
+                )
+            ],
+            month: .zero,
+            projectedMonthCostUSD: nil,
+            activeDayCount: 1,
+            sourceQuality: .detailed
+        )
+        let variantSummaries = ModelVariantUsageSummaryBuilder.build(
+            from: variantTrend,
+            window: .thirtyDays
+        )
+        expect(variantSummaries.count == 2, "variant summaries should keep High and Max separate")
+        expect(variantSummaries.first?.effort == "max", "variant summaries should sort by measured token volume")
+        expect(nearlyEqual(variantSummaries.first?.cacheHitPercent ?? .nan, 90),
+               "variant summary should calculate cache hit from cached/input")
+        expect(nearlyEqual(variantSummaries.first?.outputSharePercent ?? .nan, 200.0 / 2200.0 * 100),
+               "variant summary should calculate output share")
+        expect(ModelVariantUsageSummaryBuilder.parseVariantID("gpt-6-sol") == nil,
+               "model-only series must not be mislabeled as a reasoning variant")
 
         let highID = modelUsageIdentifier(for: "gpt-6-sol", reasoningEffort: "High")
         let xhighID = modelUsageIdentifier(for: "gpt-6-sol", reasoningEffort: "xhigh")
