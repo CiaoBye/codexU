@@ -227,7 +227,7 @@ Developer ID 签名和 Apple notarization 流程见 [DISTRIBUTION.md](DISTRIBUTI
 - Claude Code 历史 token：`~/.claude/projects/**/*.jsonl` 中 assistant message 的 `message.usage` 字段。
 - Claude Code 工具、Skill 和任务：transcript 中的 `tool_use.name` / 显式 Skill attribution，以及 `~/.claude/tasks/**/*.json`；Skill 路径缺失时按 Claude Code 的个人、项目、嵌套、插件和旧版 command 路径在当前文件系统中回退推断，无法确认时显示“当前未定位”。
 - Claude 5 小时/7 日额度：macOS 优先只读 `~/Library/Application Support/Claude/Cache/Cache_Data` 中 Claude Desktop 自己缓存的 `/api/organizations/<id>/usage` 响应；30 分钟内视为实时本地快照。缓存缺失或过期时回退 `~/Library/Caches/codexU/claude-code/statusline-snapshot.json`；两者都不可用时显示 `--`，不会用 Token 反推额度。
-- 更新检测：默认访问 GitHub Releases API，读取 `shanggqm/codexU` 的公开 release 元数据，并把检查结果缓存到 `~/Library/Caches/codexU/update-check.json`。
+- 更新检测：默认访问 GitHub Releases API，读取 `CiaoBye/codexU` 的公开 release 元数据，并把检查结果缓存到 `~/Library/Caches/codexU/update-check.json`。
 
 当前 Codex 额度 API 暴露的是滚动窗口百分比和重置时间，不暴露绝对配额数量；Claude Desktop 额度值来自官方 App 已缓存到本机的 Usage 响应，属于被动本地读取，不等同于 codexU 自己调用 Anthropic API。更完整的数据口径和回退策略见 [RESEARCH.md](RESEARCH.md)。
 
