@@ -327,7 +327,10 @@ private final class ClaudeCodeTranscriptReader {
 
         return TokenBreakdown(
             inputTokens: input + cacheCreation + cacheRead,
-            cachedInputTokens: cacheCreation + cacheRead,
+            // Claude reports cache creation and cache reads separately. Preserve
+            // that distinction so pricing does not charge writes at the read rate.
+            cachedInputTokens: cacheRead,
+            cacheWriteInputTokens: cacheCreation,
             outputTokens: output,
             reasoningOutputTokens: reasoning,
             totalTokens: total
@@ -1036,7 +1039,20 @@ private struct ClaudeSkillLoad: Codable {
 private struct ClaudeModelPrice {
     let inputPerMillion: Double
     let cachedInputPerMillion: Double
+    let cacheWriteInputPerMillion: Double
     let outputPerMillion: Double
+
+    init(
+        inputPerMillion: Double,
+        cachedInputPerMillion: Double,
+        outputPerMillion: Double,
+        cacheWriteInputPerMillion: Double? = nil
+    ) {
+        self.inputPerMillion = inputPerMillion
+        self.cachedInputPerMillion = cachedInputPerMillion
+        self.cacheWriteInputPerMillion = cacheWriteInputPerMillion ?? inputPerMillion
+        self.outputPerMillion = outputPerMillion
+    }
 }
 
 private struct ClaudeProjectAccumulator {
@@ -1202,24 +1218,76 @@ private func claudeModelPrice(for model: String?) -> ClaudeModelPrice? {
     let normalized = (model ?? "").lowercased()
     guard !normalized.isEmpty else { return nil }
 
+    // Current Claude 5 family. Cache write is the standard 5-minute write rate;
+    // local transcripts do not expose TTL, so 1-hour writes remain an estimate.
+    if normalized.contains("claude-opus-5-5") || normalized.contains("opus-5-5") {
+        return ClaudeModelPrice(
+            inputPerMillion: 4,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 20,
+            cacheWriteInputPerMillion: 5
+        )
+    }
+    if normalized.contains("claude-opus-5") || normalized.contains("opus-5") {
+        return ClaudeModelPrice(
+            inputPerMillion: 5,
+            cachedInputPerMillion: 0.5,
+            outputPerMillion: 25,
+            cacheWriteInputPerMillion: 6.25
+        )
+    }
+    if normalized.contains("claude-fable-5-1") || normalized.contains("fable-5-1") {
+        return ClaudeModelPrice(
+            inputPerMillion: 10,
+            cachedInputPerMillion: 0.25,
+            outputPerMillion: 50,
+            cacheWriteInputPerMillion: 12.5
+        )
+    }
+    if normalized.contains("claude-sonnet-5") || normalized.contains("sonnet-5") {
+        return ClaudeModelPrice(
+            inputPerMillion: 2,
+            cachedInputPerMillion: 0.2,
+            outputPerMillion: 10,
+            cacheWriteInputPerMillion: 2.5
+        )
+    }
+
+    // Legacy fallbacks retained for older local transcripts.
     if normalized.contains("opus") {
-        return ClaudeModelPrice(inputPerMillion: 15, cachedInputPerMillion: 1.5, outputPerMillion: 75)
+        return ClaudeModelPrice(
+            inputPerMillion: 15,
+            cachedInputPerMillion: 1.5,
+            outputPerMillion: 75,
+            cacheWriteInputPerMillion: 18.75
+        )
     }
     if normalized.contains("sonnet") {
-        return ClaudeModelPrice(inputPerMillion: 3, cachedInputPerMillion: 0.3, outputPerMillion: 15)
+        return ClaudeModelPrice(
+            inputPerMillion: 3,
+            cachedInputPerMillion: 0.3,
+            outputPerMillion: 15,
+            cacheWriteInputPerMillion: 3.75
+        )
     }
     if normalized.contains("haiku") {
-        return ClaudeModelPrice(inputPerMillion: 0.8, cachedInputPerMillion: 0.08, outputPerMillion: 4)
+        return ClaudeModelPrice(
+            inputPerMillion: 0.8,
+            cachedInputPerMillion: 0.08,
+            outputPerMillion: 4,
+            cacheWriteInputPerMillion: 1
+        )
     }
     return nil
 }
 
 private func claudeEstimatedCostUSD(tokens: TokenBreakdown, model: String?) -> Double {
     guard let price = claudeModelPrice(for: model) else { return 0 }
-    let uncachedInputCost = Double(tokens.uncachedInputTokens) / 1_000_000 * price.inputPerMillion
+    let uncachedInputCost = Double(tokens.ordinaryUncachedInputTokens) / 1_000_000 * price.inputPerMillion
     let cachedInputCost = Double(tokens.billableCachedInputTokens) / 1_000_000 * price.cachedInputPerMillion
+    let cacheWriteCost = Double(tokens.billableCacheWriteInputTokens) / 1_000_000 * price.cacheWriteInputPerMillion
     let outputCost = Double(max(tokens.outputTokens, 0)) / 1_000_000 * price.outputPerMillion
-    return uncachedInputCost + cachedInputCost + outputCost
+    return uncachedInputCost + cachedInputCost + cacheWriteCost + outputCost
 }
 
 private func claudeDayKey(_ date: Date, calendar: Calendar = .current) -> String {
