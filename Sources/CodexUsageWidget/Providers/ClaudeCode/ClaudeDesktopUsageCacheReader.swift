@@ -504,6 +504,58 @@ final class ClaudeDesktopUsageCacheReader {
         return nil
     }
 
+    static func diagnosticJSON(
+        context: RuntimeLoadContext = .live()
+    ) -> String {
+        var messages: [String] = []
+        let snapshot = ClaudeDesktopUsageCacheReader().load(
+            context: context,
+            messages: &messages
+        )
+
+        func window(_ value: RateWindow?) -> [String: Any]? {
+            guard let value else { return nil }
+            var result: [String: Any] = [
+                "usedPercent": value.usedPercent,
+                "remainingPercent": value.remainingPercent
+            ]
+            if let duration = value.windowDurationMins {
+                result["windowDurationMins"] = duration
+            }
+            if let resetsAt = value.resetsAt {
+                result["resetsAt"] = ISO8601DateFormatter().string(from: resetsAt)
+            }
+            return result
+        }
+
+        var object: [String: Any] = [
+            "desktopCacheDetected": snapshot.exists,
+            "hasQuota": snapshot.hasQuota,
+            "isStale": snapshot.isStale,
+            "organizationCount": snapshot.discoveredOrganizationCount,
+            "messages": messages,
+            "networkUsedByCodexU": false,
+            "credentialsReadByCodexU": false
+        ]
+        if let capturedAt = snapshot.capturedAt {
+            object["capturedAt"] = ISO8601DateFormatter().string(from: capturedAt)
+        }
+        if let primary = window(snapshot.primary) {
+            object["fiveHour"] = primary
+        }
+        if let secondary = window(snapshot.secondary) {
+            object["sevenDay"] = secondary
+        }
+
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: object,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else {
+            return "{\"error\":\"failed to encode diagnostic report\"}"
+        }
+        return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
     static func selfTest() -> Bool {
         var failures: [String] = []
         func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
