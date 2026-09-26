@@ -554,9 +554,9 @@ final class ClaudeDesktopUsageCacheReader {
                            Array(remainder.prefix(Self.zstdMagic.count)) == Self.zstdMagic {
                             zstdUsageEntryCount += 1
                         } else {
-                            let raw = remainder.drop { byte in
+                            let raw = remainder.drop(while: { byte in
                                 byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D
-                            }
+                            })
                             if raw.first == 0x7B || raw.first == 0x5B {
                                 rawUsageEntryCount += 1
                             }
