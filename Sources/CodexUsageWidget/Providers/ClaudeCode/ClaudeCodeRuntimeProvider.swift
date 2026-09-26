@@ -8,7 +8,7 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
         let transcriptLocal = ClaudeCodeTranscriptReader().loadLocalUsage(context: context, messages: &messages)
         let statsFallback = ClaudeCodeStatsCacheReader().loadFallbackLocalUsage(context: context, messages: &messages)
         let globalSkills = ClaudeCodeGlobalStateReader().loadSkillUsages(context: context, messages: &messages)
-        let statusLine = ClaudeCodeStatusLineSnapshotReader().load(context: context, messages: &messages)
+        let desktop = ClaudeDesktopUsageCacheReader().load(context: context, messages: &messages)
         let taskBoard = ClaudeCodeTaskReader().loadTaskBoard(context: context, messages: &messages)
         let local = mergeClaudeLocalUsage(transcriptLocal ?? statsFallback, globalSkills: globalSkills)
 
@@ -16,15 +16,69 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
             messages.append("暂无 Claude Code 本机用量记录")
         }
 
-        let status = makeStatus(local: local, statusLine: statusLine)
+        var primary = desktop.primary
+        var secondary = desktop.secondary
+        var quotaExists = desktop.exists
+        var quotaIsStale = desktop.isStale
+        var quotaSourceLabel: String
+        var planType = "Claude Desktop"
+
+        if desktop.hasQuota && !desktop.isStale {
+            quotaSourceLabel = "Claude Desktop 本地缓存 · 只读"
+        } else {
+            // statusLine is a strictly local fallback. It is only inspected when
+            // Desktop has no fresh quota reading, so Desktop-only users never
+            // need to run or log in to a separate Claude CLI.
+            let statusLine = ClaudeCodeStatusLineSnapshotReader().load(
+                context: context,
+                messages: &messages
+            )
+
+            if statusLine.hasQuota && !statusLine.isStale {
+                primary = statusLine.primary
+                secondary = statusLine.secondary
+                quotaExists = statusLine.exists
+                quotaIsStale = false
+                quotaSourceLabel = "Claude statusLine · 本地快照"
+                planType = "Claude Code"
+            } else if desktop.hasQuota {
+                // A dated Desktop cache is still more truthful than inventing a
+                // percentage. Keep the last official reading and mark it stale.
+                quotaSourceLabel = "Claude Desktop 本地缓存 · 已过期"
+            } else if statusLine.hasQuota {
+                primary = statusLine.primary
+                secondary = statusLine.secondary
+                quotaExists = statusLine.exists
+                quotaIsStale = statusLine.isStale
+                quotaSourceLabel = statusLine.isStale
+                    ? "Claude statusLine · 已过期"
+                    : "Claude statusLine · 本地快照"
+                planType = "Claude Code"
+            } else {
+                primary = nil
+                secondary = nil
+                quotaExists = desktop.exists || statusLine.exists
+                quotaIsStale = desktop.isStale || statusLine.isStale
+                quotaSourceLabel = "Claude 本地记录 · 暂无额度快照"
+            }
+        }
+
+        let hasQuota = primary != nil || secondary != nil
+        let status = makeStatus(
+            local: local,
+            hasQuota: hasQuota,
+            isStale: quotaIsStale,
+            sourceExists: quotaExists
+        )
+
         let snapshot = UsageSnapshot(
             refreshedAt: context.now,
-            account: AccountInfo(type: "local", planType: "Claude Code", emailPresent: false),
+            account: AccountInfo(type: "local", planType: planType, emailPresent: false),
             limitId: scope.runtimeId,
-            limitName: "Claude Code local",
-            quotaReadSucceeded: statusLine.hasQuota,
-            fiveHourQuota: statusLine.primary,
-            sevenDayQuota: statusLine.secondary,
+            limitName: "Claude local",
+            quotaReadSucceeded: hasQuota,
+            fiveHourQuota: primary,
+            sevenDayQuota: secondary,
             monthlyQuota: nil,
             credits: nil,
             cloudLifetimeTokens: nil,
@@ -37,7 +91,7 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
             scope: scope,
             snapshot: snapshot,
             status: status,
-            quotaSourceLabel: statusLine.hasQuota ? "Claude statusLine + local records" : "Local records; quota needs statusLine",
+            quotaSourceLabel: quotaSourceLabel,
             usageSourceLabel: "Claude Code local transcripts"
         )
     }
@@ -47,17 +101,22 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
         return ClaudeCodeTaskReader().loadTaskBoard(context: context, messages: &messages)
     }
 
-    private func makeStatus(local: LocalUsage?, statusLine: ClaudeStatusLineSnapshot) -> RuntimeMenuStatus {
-        if statusLine.isStale {
+    private func makeStatus(
+        local: LocalUsage?,
+        hasQuota: Bool,
+        isStale: Bool,
+        sourceExists: Bool
+    ) -> RuntimeMenuStatus {
+        if isStale, hasQuota {
             return .stale
         }
-        if statusLine.hasQuota {
+        if hasQuota {
             return .available
         }
         if local != nil {
-            return statusLine.exists ? .localOnly : .snapshotNeeded
+            return sourceExists ? .localOnly : .snapshotNeeded
         }
-        return statusLine.exists ? .localOnly : .unavailable
+        return sourceExists ? .localOnly : .unavailable
     }
 }
 
