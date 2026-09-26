@@ -3,14 +3,28 @@ import Foundation
 struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
     let scope: RuntimeScope = .claudeCode
 
+    static func selfTestRecentProjects() -> Bool {
+        ClaudeCodeTranscriptReader.selfTestRecentProjects()
+    }
+
     func loadSnapshot(context: RuntimeLoadContext) -> RuntimeUsageSnapshot {
         var messages: [String] = []
         let transcriptLocal = ClaudeCodeTranscriptReader().loadLocalUsage(context: context, messages: &messages)
-        let statsFallback = ClaudeCodeStatsCacheReader().loadFallbackLocalUsage(context: context, messages: &messages)
+        let statsFallback = transcriptLocal == nil
+            ? ClaudeCodeStatsCacheReader().loadFallbackLocalUsage(context: context, messages: &messages)
+            : nil
         let globalSkills = ClaudeCodeGlobalStateReader().loadSkillUsages(context: context, messages: &messages)
         let desktop = ClaudeDesktopUsageCacheReader().load(context: context, messages: &messages)
         let taskBoard = ClaudeCodeTaskReader().loadTaskBoard(context: context, messages: &messages)
         let local = mergeClaudeLocalUsage(transcriptLocal ?? statsFallback, globalSkills: globalSkills)
+        let usageSourceLabel: String
+        if transcriptLocal != nil {
+            usageSourceLabel = "Claude Code local transcripts"
+        } else if statsFallback != nil {
+            usageSourceLabel = "Claude Code stats-cache · local fallback"
+        } else {
+            usageSourceLabel = "Claude Code local usage unavailable"
+        }
 
         if local == nil {
             messages.append("暂无 Claude Code 本机用量记录")
@@ -92,7 +106,7 @@ struct ClaudeCodeRuntimeProvider: RuntimeUsageProvider {
             snapshot: snapshot,
             status: status,
             quotaSourceLabel: quotaSourceLabel,
-            usageSourceLabel: "Claude Code local transcripts"
+            usageSourceLabel: usageSourceLabel
         )
     }
 
@@ -376,6 +390,7 @@ private final class ClaudeCodeTranscriptReader {
         var lifetime = PricedTokenUsage.zero
         var dailyUsage: [String: (date: Date, usage: PricedTokenUsage)] = [:]
         var projects: [String: ClaudeProjectAccumulator] = [:]
+        var recentProjects: [String: ClaudeProjectAccumulator] = [:]
 
         for delta in uniqueDeltas {
             let cost = claudeEstimatedCostUSD(tokens: delta.tokens, model: delta.model)
@@ -403,6 +418,11 @@ private final class ClaudeCodeTranscriptReader {
             var project = projects[projectPath] ?? ClaudeProjectAccumulator(path: projectPath)
             project.add(delta: delta, costUSD: cost)
             projects[projectPath] = project
+            if delta.date >= sevenDayStart {
+                var recentProject = recentProjects[projectPath] ?? ClaudeProjectAccumulator(path: projectPath)
+                recentProject.add(delta: delta, costUSD: cost)
+                recentProjects[projectPath] = recentProject
+            }
         }
 
         let detailed = DetailedUsage(
@@ -422,14 +442,16 @@ private final class ClaudeCodeTranscriptReader {
             now: now,
             calendar: calendar
         )
-        let projectUsages = projects.values
-            .map { $0.makeProject() }
-            .sorted {
+        func sortedProjectUsages(_ accumulators: [String: ClaudeProjectAccumulator]) -> [ProjectUsage] {
+            accumulators.values.map { $0.makeProject() }.sorted {
                 if $0.tokens == $1.tokens {
                     return ($0.lastActiveAt ?? .distantPast) > ($1.lastActiveAt ?? .distantPast)
                 }
                 return $0.tokens > $1.tokens
             }
+        }
+        let projectUsages = sortedProjectUsages(projects)
+        let recentProjectUsages = sortedProjectUsages(recentProjects)
         let recentThreads = makeRecentThreads(from: summaries)
         let toolUsages = makeToolUsages(from: summaries, lifetime: lifetime)
         let skillUsages = makeSkillUsages(from: summaries, context: context)
@@ -450,10 +472,62 @@ private final class ClaudeCodeTranscriptReader {
             detailedUsage: detailed,
             usageTrend: usageTrend,
             inferencePerformance: nil,
-            projectBoard: ProjectBoard(recentProjects: Array(projectUsages.prefix(8)), allProjects: projectUsages),
+            projectBoard: ProjectBoard(recentProjects: recentProjectUsages, allProjects: projectUsages),
             toolUsages: toolUsages,
             skillUsages: skillUsages
         )
+    }
+
+    static func selfTestRecentProjects() -> Bool {
+        let now = Date(timeIntervalSince1970: 1_790_424_000)
+        let context = RuntimeLoadContext(
+            now: now,
+            homeDirectory: URL(fileURLWithPath: "/private/tmp/codexu-test-home", isDirectory: true),
+            cacheDirectory: URL(fileURLWithPath: "/private/tmp/codexu-test-cache", isDirectory: true),
+            statistics: StatisticsContext(
+                preference: StatisticsTimeZonePreference(selection: .utc, fixedIdentifier: "UTC"),
+                now: now
+            )
+        )
+        let summaries: [ClaudeTranscriptSummary] = (0..<9).map { index in
+            let isRecent = index == 8
+            let path = isRecent ? "/projects/recent" : "/projects/old-\(index)"
+            let date = isRecent ? now : now.addingTimeInterval(-20 * 24 * 3_600)
+            let tokens: Int64 = isRecent ? 100 : 1_000
+            return ClaudeTranscriptSummary(
+                filePath: "/private/tmp/codexu-test-\(index).jsonl",
+                sessionId: "test-\(index)",
+                projectPath: path,
+                model: nil,
+                lastActiveAt: date,
+                deltas: [ClaudeUsageDelta(
+                    messageId: "test-\(index)",
+                    date: date,
+                    tokens: TokenBreakdown(
+                        inputTokens: tokens,
+                        cachedInputTokens: 0,
+                        outputTokens: 0,
+                        reasoningOutputTokens: 0,
+                        totalTokens: tokens
+                    ),
+                    model: nil,
+                    projectPath: path,
+                    sessionId: "test-\(index)"
+                )],
+                toolCalls: [:],
+                skillLoads: []
+            )
+        }
+        var messages: [String] = []
+        let board = ClaudeCodeTranscriptReader()
+            .makeLocalUsage(from: summaries, context: context, messages: &messages)?
+            .projectBoard
+        let valid = board?.allProjects.count == 9
+            && board?.recentProjects.count == 1
+            && board?.recentProjects.first?.id == "/projects/recent"
+            && board?.recentProjects.first?.tokens == 100
+        if !valid { print("Claude recent-project self-test failed") }
+        return valid
     }
 
     private func makeSevenDayBuckets(
@@ -819,7 +893,10 @@ private final class ClaudeCodeStatusLineSnapshotReader {
         }
 
         let capturedAt = claudeDateValue(object["capturedAt"]) ?? claudeDateValue(object["captured_at"])
-        let isStale = capturedAt.map { context.now.timeIntervalSince($0) > 900 } ?? false
+        let isStale = capturedAt.map {
+            let age = context.now.timeIntervalSince($0)
+            return age > 900 || age < -900
+        } ?? true
         if isStale {
             messages.append("Claude Code 快照已过期，打开 Claude Code 后刷新")
         }

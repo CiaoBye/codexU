@@ -25,6 +25,8 @@ jobs:
         run: build/codexU.app/Contents/MacOS/codexU --self-test-particle-animation
       - name: Claude Desktop cache self-test
         run: build/codexU.app/Contents/MacOS/codexU --self-test-claude-desktop-cache
+      - name: Claude recent projects self-test
+        run: build/codexU.app/Contents/MacOS/codexU --self-test-claude-recent-projects
       - name: GPT-6 pricing, reasoning attribution, and quota efficiency tests
         run: |
           build/codexU.app/Contents/MacOS/codexU --self-test-model-pricing

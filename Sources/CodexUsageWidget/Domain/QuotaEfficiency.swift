@@ -29,6 +29,7 @@ struct QuotaEfficiencyVariantSummary: Identifiable, Equatable {
     let measuredUsage: PricedTokenUsage
     let projectedWeeklyTokens: Double
     let dominantShareAverage: Double
+    let latestSampleAt: Date
 
     var tokensPerQuotaPercent: Double {
         guard measuredQuotaPercent > 0 else { return 0 }
@@ -69,6 +70,7 @@ private struct QuotaEfficiencyObservation {
     let quotaDeltaPercent: Double
     let usageDelta: PricedTokenUsage
     let dominantShare: Double
+    let capturedAt: Date
 }
 
 private struct QuotaEfficiencyDiskState: Codable {
@@ -206,6 +208,7 @@ final class QuotaEfficiencyHistoryStore {
             var quota = 0.0
             var usage = PricedTokenUsage.zero
             var dominantShareTotal = 0.0
+            var latestSampleAt: Date?
         }
 
         var grouped: [String: Accumulator] = [:]
@@ -220,11 +223,18 @@ final class QuotaEfficiencyHistoryStore {
                 usesReferencePricing: observation.usageDelta.usesReferencePricing
             )
             accumulator.dominantShareTotal += observation.dominantShare
+            accumulator.latestSampleAt = max(
+                accumulator.latestSampleAt ?? observation.capturedAt,
+                observation.capturedAt
+            )
             grouped[observation.variant.id] = accumulator
         }
 
         return grouped.values.compactMap { value in
-            guard value.quota > 0, value.usage.tokens.visibleTotalTokens > 0 else { return nil }
+            guard value.quota > 0,
+                  value.usage.tokens.visibleTotalTokens > 0,
+                  let latestSampleAt = value.latestSampleAt
+            else { return nil }
             let projected = Double(value.usage.tokens.visibleTotalTokens) / value.quota * 100
             return QuotaEfficiencyVariantSummary(
                 id: value.variant.id,
@@ -236,7 +246,8 @@ final class QuotaEfficiencyHistoryStore {
                 projectedWeeklyTokens: projected,
                 dominantShareAverage: value.sampleCount > 0
                     ? value.dominantShareTotal / Double(value.sampleCount)
-                    : 0
+                    : 0,
+                latestSampleAt: latestSampleAt
             )
         }
         .sorted {
@@ -309,6 +320,9 @@ final class QuotaEfficiencyHistoryStore {
         }
 
         let dominantTokens = dominant.usage.tokens.visibleTotalTokens
+        // A variant cannot grow by more than all detailed usage combined.
+        // Reject inconsistent rolling-history or reclassification deltas.
+        guard dominantTokens <= totalTokens else { return nil }
         let dominantShare = Double(dominantTokens) / Double(totalTokens)
         guard dominantTokens >= minimumVariantTokens,
               dominantShare >= minimumDominantShare
@@ -321,7 +335,8 @@ final class QuotaEfficiencyHistoryStore {
             variant: dominant.variant,
             quotaDeltaPercent: quotaDelta,
             usageDelta: dominant.usage,
-            dominantShare: dominantShare
+            dominantShare: dominantShare,
+            capturedAt: current.capturedAt
         )
     }
 
@@ -480,11 +495,40 @@ final class QuotaEfficiencyHistoryStore {
         expect(store.makeObservation(previous: second, current: auxiliaryMixed) == nil,
                "non-effort traffic must count in the dominance denominator")
 
+        let reclassifiedBaseline = QuotaEfficiencyCheckpoint(
+            capturedAt: reset.addingTimeInterval(-3600),
+            weeklyUsedPercent: 20,
+            weeklyResetsAt: reset,
+            allUsage: usage(total: 20_000_000, input: 19_800_000, cached: 19_400_000, output: 200_000),
+            variants: [high0, max0]
+        )
+        let reclassifiedCurrent = QuotaEfficiencyCheckpoint(
+            capturedAt: reset.addingTimeInterval(-1800),
+            weeklyUsedPercent: 30,
+            weeklyResetsAt: reset,
+            allUsage: usage(total: 21_000_000, input: 20_790_000, cached: 20_370_000, output: 210_000),
+            variants: [
+                QuotaEfficiencyVariantTotal(
+                    id: high0.id,
+                    model: high0.model,
+                    effort: high0.effort,
+                    usage: usage(total: 12_000_000, input: 11_880_000, cached: 11_640_000, output: 120_000)
+                ),
+                max0
+            ]
+        )
+        expect(store.makeObservation(previous: reclassifiedBaseline, current: reclassifiedCurrent) == nil,
+               "variant growth larger than all-usage growth must not become a greater-than-100% dominance sample")
+
         let summaries = store.summaries(from: [first, second])
         expect(summaries.count == 1 && summaries[0].effort == "high",
                "clean interval should produce one High efficiency summary")
         expect(abs(summaries[0].projectedWeeklyTokens - 250_000_000) < 1,
                "25M tokens over 10% quota should project to 250M/week")
+        expect(summaries[0].latestSampleAt == second.capturedAt,
+               "summary should expose the capture time of its latest valid interval")
+        expect(store.summaries(from: [first, second, mixed]).first?.latestSampleAt == second.capturedAt,
+               "a later rejected interval must not change the latest valid sample time")
 
         if failures.isEmpty {
             print("quota efficiency self-test passed")

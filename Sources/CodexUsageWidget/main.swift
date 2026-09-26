@@ -1255,7 +1255,7 @@ final class UsageStore: ObservableObject {
 
 final class CodexUsageReader {
     private let fileManager = FileManager.default
-    private let localAnalyticsCacheVersion = 16
+    private let localAnalyticsCacheVersion = 17
     private let sessionUsageCacheVersion = 11
     private let inferenceSampleSchemaVersion = 2
     private static let memorySessionUsageCacheLimit = 64
@@ -2212,6 +2212,7 @@ final class CodexUsageReader {
                 sevenDayStart: sevenDayStart,
                 trendStart: trendStart,
                 monthStart: monthStart,
+                calendar: calendar,
                 sourceQuality: .detailed,
                 modelDailyUsage: dailyUsageByModel,
                 modelNamesByID: modelNamesByID
@@ -2244,11 +2245,11 @@ final class CodexUsageReader {
         sevenDayStart: Date,
         trendStart: Date,
         monthStart: Date,
+        calendar: Calendar,
         sourceQuality: UsageSourceQuality,
         modelDailyUsage: [String: [String: PricedTokenUsage]] = [:],
         modelNamesByID: [String: String] = [:]
     ) -> UsageTrend {
-        let calendar = Calendar.current
         var buckets: [UsageDayBucket] = []
         var cursor = calendar.startOfDay(for: trendStart)
         let end = calendar.startOfDay(for: dayStart)
@@ -2325,6 +2326,7 @@ final class CodexUsageReader {
                 sevenDayStart: sevenDayStart,
                 trendStart: trendStart,
                 monthStart: monthStart,
+                calendar: calendar,
                 sourceQuality: sourceQuality
             )
             guard modelTrend.activeDayCount > 0 else { return nil }
@@ -2363,6 +2365,44 @@ final class CodexUsageReader {
             activeDayCount: buckets.filter { $0.tokens > 0 }.count,
             sourceQuality: sourceQuality
         )
+    }
+
+    static func selfTestUsageTrendTimeZone() -> Bool {
+        let reference = Date(timeIntervalSince1970: 1_767_312_000)
+        let systemOffset = TimeZone.current.secondsFromGMT(for: reference)
+        let testOffset = systemOffset == 14 * 3_600 ? -12 * 3_600 : 14 * 3_600
+        guard let timeZone = TimeZone(secondsFromGMT: testOffset) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        guard let dayStart = calendar.date(from: DateComponents(year: 2026, month: 1, day: 2)) else {
+            return false
+        }
+        let key = localDayKey(dayStart, calendar: calendar)
+        let usage = PricedTokenUsage(
+            tokens: TokenBreakdown(
+                inputTokens: 100,
+                cachedInputTokens: 0,
+                outputTokens: 0,
+                reasoningOutputTokens: 0,
+                totalTokens: 100
+            ),
+            estimatedCostUSD: 0
+        )
+        let trend = CodexUsageReader().makeUsageTrend(
+            dailyUsage: [key: usage],
+            dayStart: dayStart,
+            sevenDayStart: dayStart,
+            trendStart: dayStart,
+            monthStart: dayStart,
+            calendar: calendar,
+            sourceQuality: .detailed,
+            modelDailyUsage: ["test::effort=high": [key: usage]]
+        )
+        let valid = trend.dayBuckets.last?.usage.tokens.visibleTotalTokens == 100
+            && trend.modelTrends?.first?.dayBuckets.last?.usage.tokens.visibleTotalTokens == 100
+            && trend.summary.sevenDay.tokens.visibleTotalTokens == 100
+        if !valid { print("usage trend time-zone self-test failed") }
+        return valid
     }
 
     private func makeHeatmapData(
@@ -2491,6 +2531,7 @@ final class CodexUsageReader {
             sevenDayStart: sevenDayStart,
             trendStart: trendStart,
             monthStart: monthStart,
+            calendar: calendar,
             sourceQuality: .approximate,
             modelDailyUsage: dailyUsageByModel,
             modelNamesByID: modelNamesByID
@@ -4781,6 +4822,7 @@ struct UsageWidgetView: View {
         case .projects:
             ProjectBoardPanel(
                 projectBoard: snapshot.local?.projectBoard,
+                runtimeScope: store.selectedRuntimeScope,
                 language: language
             )
         case .skills:
@@ -8764,7 +8806,10 @@ private struct ModelVariantUsageTableCard: View {
 
             if let efficiency {
                 HStack(spacing: 8) {
-                    Text(language.text("周额度效率", "Weekly efficiency"))
+                    Text(language.text(
+                        "历史周效率 · \(resetDateTime(efficiency.latestSampleAt, language: language))",
+                        "Historical weekly efficiency · \(resetDateTime(efficiency.latestSampleAt, language: language))"
+                    ))
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundStyle(.secondary)
                     Text(
@@ -8792,6 +8837,10 @@ private struct ModelVariantUsageTableCard: View {
                 .font(.system(size: 8, weight: .medium, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.tertiary)
+                .help(language.text(
+                    "历史采样独立于上方日期范围；本机样本等级只反映样本数量和单一档位占比，无法排除其他设备或云端的额度消耗。",
+                    "Historical samples are independent of the selected date range. Local sample quality reflects sample count and effort dominance; usage on other devices or in the cloud is not measured."
+                ))
             }
         }
         .padding(.horizontal, 8)
@@ -8802,9 +8851,9 @@ private struct ModelVariantUsageTableCard: View {
     private func confidenceText(_ confidence: QuotaEfficiencyConfidence) -> String {
         switch confidence {
         case .high:
-            return language.text("高可信", "High confidence")
+            return language.text("本机样本高", "High local sample")
         case .medium:
-            return language.text("中可信", "Medium confidence")
+            return language.text("本机样本中", "Medium local sample")
         case .early:
             return language.text("早期样本", "Early sample")
         }
@@ -9712,6 +9761,7 @@ enum ProjectTimeframe: String, CaseIterable, Identifiable {
 
 struct ProjectBoardPanel: View {
     let projectBoard: ProjectBoard?
+    let runtimeScope: RuntimeScope
     let language: WidgetLanguage
     @State private var timeframe: ProjectTimeframe = .recent
 
@@ -9746,7 +9796,10 @@ struct ProjectBoardPanel: View {
                         AnalyticsEmptyState(
                             systemName: "folder.badge.questionmark",
                             title: language.text("暂无项目记录", "No project records"),
-                            detail: language.text("没有可归类的本机 Codex 项目用量。", "No local Codex project usage can be grouped yet.")
+                            detail: language.text(
+                                "没有可归类的本机 \(runtimeScope.displayName) 项目用量。",
+                                "No local \(runtimeScope.displayName) project usage can be grouped yet."
+                            )
                         )
                         .frame(minHeight: 214)
                     } else {
@@ -9756,7 +9809,7 @@ struct ProjectBoardPanel: View {
             }
             .frame(maxWidth: .infinity, alignment: .topLeading)
 
-            ProjectActivityOverview(projectBoard: projectBoard, language: language)
+            ProjectActivityOverview(projectBoard: projectBoard, runtimeScope: runtimeScope, language: language)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
@@ -9764,6 +9817,7 @@ struct ProjectBoardPanel: View {
 
 struct ProjectActivityOverview: View {
     let projectBoard: ProjectBoard?
+    let runtimeScope: RuntimeScope
     let language: WidgetLanguage
     @Environment(\.visualTokens) private var visualTokens
 
@@ -9771,20 +9825,8 @@ struct ProjectActivityOverview: View {
         projectBoard?.recentProjects ?? []
     }
 
-    private var allProjects: [ProjectUsage] {
-        projectBoard?.allProjects ?? []
-    }
-
     private var recentTokenTotal: Int64 {
         recentProjects.reduce(0) { $0 + $1.tokens }
-    }
-
-    private var newProjectCount: Int {
-        let allById = Dictionary(uniqueKeysWithValues: allProjects.map { ($0.id, $0) })
-        return recentProjects.filter { recent in
-            guard let all = allById[recent.id] else { return false }
-            return all.threadCount <= recent.threadCount
-        }.count
     }
 
     private var topOneShare: String {
@@ -9816,7 +9858,10 @@ struct ProjectActivityOverview: View {
                 ) {
                     InfoChip(title: language.text("近 7 天", "7 days"), value: "\(recentProjects.count)")
                         .frame(height: dashboardHeaderControlHeight)
-                        .help(language.text("基于近 7 天本机 Codex 项目活动统计。", "Based on local Codex project activity in the last 7 days."))
+                        .help(language.text(
+                            "基于近 7 天本机 \(runtimeScope.displayName) 项目活动统计。",
+                            "Based on local \(runtimeScope.displayName) project activity in the last 7 days."
+                        ))
                 }
 
                 if recentProjects.isEmpty {
@@ -9835,9 +9880,9 @@ struct ProjectActivityOverview: View {
                                 tint: visualTokens.data.series[1].color
                             )
                             MetricTile(
-                                title: language.text("新增估算", "New est."),
-                                value: "\(newProjectCount)",
-                                tint: FixedVisualPalette.statusSuccess
+                                title: language.text("近 7 天 Token", "7-day tokens"),
+                                value: formatTokens(recentTokenTotal),
+                                tint: visualTokens.data.series[0].color
                             )
                         }
                         HStack(spacing: dashboardListRowSpacing) {
@@ -12566,7 +12611,7 @@ struct codexUMain {
         }
 
         if CommandLine.arguments.contains("--self-test-statistics-time-zone") {
-            exit(StatisticsTimeZoneSelfTest.run() ? 0 : 1)
+            exit(StatisticsTimeZoneSelfTest.run() && CodexUsageReader.selfTestUsageTrendTimeZone() ? 0 : 1)
         }
 
         if CommandLine.arguments.contains("--self-test-token-counter") {
@@ -12609,6 +12654,10 @@ struct codexUMain {
 
         if CommandLine.arguments.contains("--self-test-claude-desktop-cache") {
             exit(ClaudeDesktopUsageCacheReader.selfTest() ? 0 : 1)
+        }
+
+        if CommandLine.arguments.contains("--self-test-claude-recent-projects") {
+            exit(ClaudeCodeRuntimeProvider.selfTestRecentProjects() ? 0 : 1)
         }
 
         if CommandLine.arguments.contains("--self-test-claude-skill-paths") {
