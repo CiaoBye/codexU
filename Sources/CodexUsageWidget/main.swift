@@ -739,6 +739,8 @@ final class UsageStore: ObservableObject {
     @Published private(set) var visualEnergyMode: VisualEnergyMode = .suspended
     @Published private(set) var codexLiveTasks: CodexTaskLiveSnapshot = .disconnected
     @Published private(set) var taskFocusRequest: TaskFocusRequest?
+    @Published private(set) var quotaEfficiencySummaries: [QuotaEfficiencyVariantSummary] =
+        QuotaEfficiencyHistoryStore.shared.loadSummaries()
 
     private var fullTimer: Timer?
     private var taskBoardTimer: Timer?
@@ -1204,6 +1206,12 @@ final class UsageStore: ObservableObject {
         runtimeSnapshots = displayedRuntimes
         selectedRuntimeScope = nextScope
         snapshot = reconciledSnapshot.displaySnapshot(for: nextScope)
+        if let codexRuntime = displayedRuntimes.first(where: { $0.scope == .codex }) {
+            quotaEfficiencySummaries = QuotaEfficiencyHistoryStore.shared.record(
+                runtime: codexRuntime,
+                at: multiSnapshot.refreshedAt
+            )
+        }
     }
 
     private func applyTaskBoard(_ taskBoard: TaskBoard?, for scope: RuntimeScope) {
@@ -4761,6 +4769,7 @@ struct UsageWidgetView: View {
                 trend: snapshot.local?.usageTrend,
                 runtimeScope: store.selectedRuntimeScope,
                 language: language,
+                efficiencySummaries: store.quotaEfficiencySummaries,
                 window: $settings.usageTrendWindow
             )
         case .inference:
@@ -8216,6 +8225,7 @@ struct UsageTrendPanel: View {
     let trend: UsageTrend?
     let runtimeScope: RuntimeScope
     let language: WidgetLanguage
+    let efficiencySummaries: [QuotaEfficiencyVariantSummary]
     @Binding var window: UsageTrendWindow
 
     private func variantSummaries(for trend: UsageTrend) -> [ModelVariantUsageSummary] {
@@ -8283,6 +8293,7 @@ struct UsageTrendPanel: View {
                     if !variants.isEmpty {
                         ModelVariantUsageTableCard(
                             summaries: variants,
+                            efficiencySummaries: efficiencySummaries,
                             language: language,
                             window: window
                         )
@@ -8657,8 +8668,13 @@ struct ModelUsageAreaChartCard: View {
 
 private struct ModelVariantUsageTableCard: View {
     let summaries: [ModelVariantUsageSummary]
+    let efficiencySummaries: [QuotaEfficiencyVariantSummary]
     let language: WidgetLanguage
     let window: UsageTrendWindow
+
+    private var efficiencyByID: [String: QuotaEfficiencyVariantSummary] {
+        Dictionary(uniqueKeysWithValues: efficiencySummaries.map { ($0.id, $0) })
+    }
 
     private var visibleSummaries: [ModelVariantUsageSummary] {
         Array(summaries.prefix(8))
@@ -8715,37 +8731,83 @@ private struct ModelVariantUsageTableCard: View {
     }
 
     private func tableRow(_ row: ModelVariantUsageSummary) -> some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Text(row.model)
-                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                Text(row.effort.uppercased())
-                    .font(.system(size: 8, weight: .bold, design: .rounded))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(FixedVisualPalette.surfaceTrack.opacity(0.72))
-                    )
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let efficiency = efficiencyByID[row.id]
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                HStack(spacing: 7) {
+                    Text(row.model)
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Text(row.effort.uppercased())
+                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(FixedVisualPalette.surfaceTrack.opacity(0.72))
+                        )
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            valueText(formatTokens(row.usage.tokens.visibleTotalTokens), width: 82)
-            valueText(formatTokens(row.usage.tokens.inputTokens), width: 82)
-            valueText(formatTokens(row.usage.tokens.billableCachedInputTokens), width: 82)
-            valueText(row.cacheHitPercent.map { String(format: "%.1f%%", $0) } ?? "--", width: 62)
-            valueText(formatTokens(row.usage.tokens.outputTokens), width: 76)
-            valueText(
-                row.usage.estimatedCostUSD > 0 ? formatUSD(row.usage.estimatedCostUSD) : "--",
-                width: 76
-            )
+                valueText(formatTokens(row.usage.tokens.visibleTotalTokens), width: 82)
+                valueText(formatTokens(row.usage.tokens.inputTokens), width: 82)
+                valueText(formatTokens(row.usage.tokens.billableCachedInputTokens), width: 82)
+                valueText(row.cacheHitPercent.map { String(format: "%.1f%%", $0) } ?? "--", width: 62)
+                valueText(formatTokens(row.usage.tokens.outputTokens), width: 76)
+                valueText(
+                    row.usage.estimatedCostUSD > 0 ? formatUSD(row.usage.estimatedCostUSD) : "--",
+                    width: 76
+                )
+            }
+
+            if let efficiency {
+                HStack(spacing: 8) {
+                    Text(language.text("周额度效率", "Weekly efficiency"))
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(
+                        language.text(
+                            "外推 \(formatTokens(Int64(efficiency.projectedWeeklyTokens.rounded()))) / 周",
+                            "Projected \(formatTokens(Int64(efficiency.projectedWeeklyTokens.rounded()))) / week"
+                        )
+                    )
+                    Text(
+                        language.text(
+                            "\(formatTokens(Int64(efficiency.tokensPerQuotaPercent.rounded()))) / 1% 额度",
+                            "\(formatTokens(Int64(efficiency.tokensPerQuotaPercent.rounded()))) / 1% quota"
+                        )
+                    )
+                    Text(
+                        language.text(
+                            "实测 \(String(format: "%.1f%%", efficiency.measuredQuotaPercent)) · \(efficiency.sampleCount) 段",
+                            "Measured \(String(format: "%.1f%%", efficiency.measuredQuotaPercent)) · \(efficiency.sampleCount) intervals"
+                        )
+                    )
+                    Text(confidenceText(efficiency.confidence))
+                        .fontWeight(.semibold)
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 8, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+            }
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+        .padding(.vertical, efficiency == nil ? 7 : 5)
         .accessibilityElement(children: .combine)
+    }
+
+    private func confidenceText(_ confidence: QuotaEfficiencyConfidence) -> String {
+        switch confidence {
+        case .high:
+            return language.text("高可信", "High confidence")
+        case .medium:
+            return language.text("中可信", "Medium confidence")
+        case .early:
+            return language.text("早期样本", "Early sample")
+        }
     }
 
     private func headerText(
@@ -10851,7 +10913,7 @@ private let settingsShortcutActionWidth: CGFloat = settingsAccessoryColumnWidth
 private let usageTrendCardHeight: CGFloat = 214
 private let usageTrendCardSpacing: CGFloat = dashboardGridSpacing
 private let usageTrendAreaChartHeight: CGFloat = 344
-private let usageTrendVariantTableHeight: CGFloat = 238
+private let usageTrendVariantTableHeight: CGFloat = 286
 private let usageTrendAreaPlotHeight: CGFloat = 210
 private let usageTrendAreaAxisHeight: CGFloat = 16
 private let usageTrendLegendHeight: CGFloat = 18
@@ -12518,6 +12580,11 @@ struct codexUMain {
         if CommandLine.arguments.contains("--self-test-model-usage-trend") {
             exit(ModelUsageTrendSelfTest.run() ? 0 : 1)
         }
+
+        if CommandLine.arguments.contains("--self-test-quota-efficiency") {
+            exit(QuotaEfficiencyHistoryStore.selfTest() ? 0 : 1)
+        }
+
 
         if CommandLine.arguments.contains("--self-test-model-inference-performance") {
             exit(ModelInferencePerformanceSelfTest.run() ? 0 : 1)
