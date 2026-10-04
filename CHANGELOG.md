@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- 新增可与官方版并存的 `codexU Next` 开发构建：独立 Bundle ID、App 名称、UserDefaults、Cache 和推理历史目录，避免测试 v1.4.0 时覆盖正式版或污染其本机缓存；提供 `make dev-build` / `dev-install` / `dev-dmg-arm64`。
+- Claude 额度读取改为 **Claude Desktop 本地 HTTP 缓存优先**：直接读取官方 Desktop 已落盘的 Usage 响应，全程只读，不请求 Anthropic、不读取 OAuth/Keychain、不自动运行 `claude`；本地缓存无有效数据时才回退现有 statusLine 快照。
+- 新增 Claude Desktop Chromium Simple Cache + Zstandard 解码支持，并加入 30 分钟新鲜度判定、多账号最近记录选择、缓存路径探测和独立自测；缓存过期时保留最后官方读数并明确标记为陈旧数据。
+- Claude transcript 费用统计保留 cache creation / cache read 语义，更新 Claude Opus 5.5 等当前模型价格。
+- Codex 补齐 GPT-6 Astra / GPT-6 Sol / GPT-6 Luna 当前标准价格、缓存价格、Fast 与 >272K 长上下文估算。
+- Codex 用量趋势升级为 **模型 × reasoning effort** 归因，High / xhigh / Max 不再全部并入同一个模型曲线，便于直接比较各推理档位的 Token、缓存与 API 等效成本。
+- 用量页新增“推理档位用量表”，按选定 30/60/90/180 天范围直接展示模型 × High/xhigh/Max 的总 Token、输入、缓存、缓存命中率、输出和 API 等价值。
+- 新增“周额度效率”自动采样：把 Codex 官方 7 天已用百分比与本地模型 × reasoning effort Token 增量配对，仅在单一档位占区间 Token ≥90% 时计入样本；自动外推每 1% 额度 Token 与完整周容量，混用模型/档位的区间直接丢弃而不猜分摊。
+- 修正 Claude 项目榜单的“近 7 天”口径，按近期 usage 事件独立聚合全部活跃项目；活动概览改为显示近 7 天 Token，避免把累计排行误当近期排行或推断出不可靠的新增项目数。
+- 修正自定义统计时区下 Codex 趋势日桶的日期键，并拒绝 Token 增量超过全部本机用量的周额度效率样本；历史效率显示最近有效采样时间，明确本机采样无法覆盖其他设备用量。
+- Claude statusLine 回退在快照时间缺失或过期时标记为陈旧数据；用量来源随 transcript、stats-cache 或无本机记录的实际回退路径更新。
+- 额度重置时间按最近分钟显示，避免缓存中 `06:59:59` 被界面截断为 `06:59`，与官方显示的 `07:00` 不一致。
+- 新增 `THIRD_PARTY_NOTICES.md`，记录 Zstandard BSD-3-Clause 与 Codenotch MIT 本地缓存实现参考来源。
+
+
 ## 1.3.1 - 2026-09-01
 
 - 完成独立 Windows x86_64 Tauri Dashboard V0：Overview、Tasks、AI Leadership、Usage、Inference、Projects、Skills 和 Settings 八个 Web surface 统一接入本地数据管线。

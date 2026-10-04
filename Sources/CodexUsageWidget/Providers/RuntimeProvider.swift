@@ -1,5 +1,13 @@
 import Foundation
 
+enum CodexUOwnedPaths {
+    static var directoryName: String {
+        Bundle.main.bundleIdentifier == "com.ciaobye.codexu.next"
+            ? "codexUNext"
+            : "codexU"
+    }
+}
+
 struct RuntimeLoadContext {
     let now: Date
     let homeDirectory: URL
@@ -15,8 +23,10 @@ struct RuntimeLoadContext {
             ?? FileManager.default.homeDirectoryForCurrentUser
         let cache = environment["CODEXU_CACHE_OVERRIDE"].map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("codexU", isDirectory: true)
-            ?? home.appendingPathComponent("Library/Caches/codexU", isDirectory: true)
+            .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
+            ?? home
+                .appendingPathComponent("Library/Caches", isDirectory: true)
+                .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
         return RuntimeLoadContext(
             now: now,
             homeDirectory: home,

@@ -62,7 +62,7 @@ enum ModelInferenceHistoryStore {
 
     static func archiveURL(fileManager: FileManager = .default) -> URL? {
         fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("codexU", isDirectory: true)
+            .appendingPathComponent(CodexUOwnedPaths.directoryName, isDirectory: true)
             .appendingPathComponent("inference-performance-v1.json")
     }
 }
